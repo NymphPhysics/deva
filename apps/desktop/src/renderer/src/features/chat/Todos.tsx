@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import { Check, ChevronUp, Circle, CircleDot } from 'lucide-react'
+import { Check, ChevronUp, Circle, CircleDot, X } from 'lucide-react'
 import { useI18n } from '../../i18n/i18n'
 import { useChat } from '../../store/chat'
 import type { TodoItem } from '../../../../preload'
@@ -149,6 +149,19 @@ export function TodoCapsule(): React.JSX.Element | null {
         </span>
         <ChevronUp size={14} className="cf-todo__caret" />
       </button>
+      {/* 胶囊上的「收起这份清单」：清单一挂就是好几天、模型早就忘了它的时候，用户不必展开面板也能一眼清掉。
+          与面板里那个取消按钮同义，只是省一步。回合进行中不给（模型正在推进它，取消了也会被立刻写回）。 */}
+      {!streaming && (
+        <button
+          type="button"
+          className="cf-todo__dismiss"
+          title={t('chat.todo.cancelHint')}
+          aria-label={t('chat.todo.cancelHint')}
+          onClick={cancelTodoList}
+        >
+          <X size={13} />
+        </button>
+      )}
     </div>
   )
 }

@@ -2468,6 +2468,33 @@ button.cf-mask__pill:hover {
   font-size: 11.5px;
   cursor: pointer;
 }
+/* 胶囊右侧的「收起清单」×：平时与胶囊同体、悬停才显形，不抢进度条的注意力。
+   它和胶囊是并排的两个按钮，靠胶囊自身的圆角与阴影连在一起看。 */
+.cf-todo__dismiss {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  margin-left: -4px;
+  padding: 0;
+  border: 0;
+  border-radius: var(--radius-full);
+  background: transparent;
+  color: var(--fg-subtle);
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 0.15s ease, background 0.15s ease;
+}
+.cf-todo:hover .cf-todo__dismiss,
+.cf-todo__dismiss:focus-visible {
+  opacity: 1;
+}
+.cf-todo__dismiss:hover {
+  background: var(--bg-hover, rgba(127, 127, 127, 0.16));
+  color: var(--fg);
+}
 .cf-todo__cancel:hover:not(:disabled) {
   background: var(--bg-hover);
   color: var(--fg);
