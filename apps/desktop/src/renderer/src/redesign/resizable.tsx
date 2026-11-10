@@ -16,6 +16,8 @@ export interface Layout {
 }
 
 export const SIDEBAR_DEFAULT = 300
+/** 对话页右侧侧栏（/side）的固定宽度：窄到能并排看清楚，又不至于把主对话挤成一条。 */
+export const SIDE_PANEL_W = 380
 export const SIDEBAR_MIN = 220
 export const SIDEBAR_MAX = 480
 /** 把对话页的会话列表往左拖到比这还窄（已低于下限、继续拖）就收起；收起后往右拖过它即拉出来。 */

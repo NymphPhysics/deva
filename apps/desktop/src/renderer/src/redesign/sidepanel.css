@@ -1,0 +1,157 @@
+
+/* ============================ 侧栏（/side 侧边提问） ============================ */
+/* 网格第 4 列：宽度由 --cf-side-r 给（关着时 0）。整块自成一体，左缘一条分隔线。 */
+.cf-sidepanel {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  border-left: 1px solid var(--border);
+  background: var(--bg-panel, var(--bg));
+}
+.cf-sidepanel__head {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: 12px 12px 10px 14px;
+  border-bottom: 1px solid var(--border);
+}
+.cf-sidepanel__icon {
+  flex: none;
+  color: var(--fg-subtle);
+}
+.cf-sidepanel__title {
+  flex: 1;
+  min-width: 0;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--fg);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.cf-sidepanel__close {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--fg-subtle);
+  cursor: pointer;
+  position: relative;
+  z-index: 1;
+  pointer-events: auto;
+  -webkit-app-region: no-drag;
+}
+.cf-sidepanel__close:hover {
+  background: var(--bg-hover, rgba(127, 127, 127, 0.14));
+  color: var(--fg);
+}
+/* 发起这次提问时选中的那段文字：单行省略，整段挂悬停，不抢正文空间。 */
+.cf-sidepanel__quote {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  margin: 10px 12px 0;
+  padding: 6px 10px;
+  border-radius: 6px;
+  background: var(--bg-inset);
+  font-size: 11px;
+}
+.cf-sidepanel__quote-label {
+  flex: none;
+  color: var(--fg-subtle);
+}
+.cf-sidepanel__quote-text {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--fg-muted);
+}
+.cf-sidepanel__body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 12px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.cf-sidepanel__empty {
+  margin: auto 0;
+  padding: 0 6px;
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--fg-subtle);
+  text-align: center;
+}
+.cf-sidepanel__msg {
+  font-size: calc(13px * var(--cs, 1));
+  line-height: 1.62;
+  color: var(--fg);
+}
+/* 用户说的是提问：给一条左侧细线做区分，不用气泡（侧栏窄，气泡更挤）。 */
+.cf-sidepanel__msg.is-user {
+  padding-left: 10px;
+  border-left: 2px solid var(--accent);
+  color: var(--fg-muted);
+}
+.cf-sidepanel__working {
+  font-size: 12px;
+  color: var(--fg-subtle);
+}
+.cf-sidepanel__composer {
+  display: flex;
+  align-items: flex-end;
+  gap: 6px;
+  padding: 8px 12px;
+  border-top: 1px solid var(--border);
+}
+.cf-sidepanel__input {
+  flex: 1;
+  min-width: 0;
+  max-height: 140px;
+  padding: 7px 9px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg-inset);
+  color: var(--fg);
+  font: inherit;
+  font-size: 12px;
+  line-height: 1.5;
+  resize: none;
+}
+.cf-sidepanel__input:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+.cf-sidepanel__send {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: 0;
+  border-radius: 7px;
+  background: var(--accent);
+  color: #fff;
+  cursor: pointer;
+}
+.cf-sidepanel__send:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+.cf-sidepanel__foot {
+  padding: 0 12px 10px;
+  font-size: 10px;
+  line-height: 1.5;
+  color: var(--fg-subtle);
+}

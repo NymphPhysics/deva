@@ -1413,6 +1413,94 @@ button.tl__line:hover {
 .tl__item.is-open > .tl__main > .tl__think-head > .tl__line .tl__caret {
   transform: rotate(90deg);
 }
+/* 工具行右侧的预览键（read_file 才有）：平时淡出、悬停该行时显形，不抢文字的注意力。 */
+.tl__preview {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--fg-subtle);
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 0.15s ease, background 0.15s ease;
+}
+.tl__line:hover .tl__preview,
+.tl__preview:focus-visible {
+  opacity: 1;
+}
+.tl__preview:hover {
+  background: var(--bg-hover, rgba(127, 127, 127, 0.14));
+  color: var(--fg);
+}
+/* 预览面板：宽一点、正文区限高可滚（大文件不把窗口撑破）。 */
+.fprev {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+.fprev__head {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-2);
+  padding: 14px 18px 10px;
+  border-bottom: 1px solid var(--border);
+}
+.fprev__name {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--fg);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.fprev__ext {
+  flex: none;
+  font-size: 11px;
+  color: var(--fg-subtle);
+}
+.fprev__body {
+  padding: 12px 18px 18px;
+  max-height: 70vh;
+  overflow: auto;
+}
+.fprev__note {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: 18px 0;
+  font-size: 13px;
+  color: var(--fg-subtle);
+}
+.fprev__thumb {
+  display: block;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  cursor: zoom-in;
+  position: relative;
+}
+.fprev__thumb img {
+  display: block;
+  max-width: 100%;
+  max-height: 60vh;
+  border-radius: 8px;
+}
+.fprev__thumb-n {
+  position: absolute;
+  right: 8px;
+  bottom: 8px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: rgba(0, 0, 0, 0.6);
+  color: #fff;
+  font-size: 11px;
+}
 .tl__body {
   margin-top: var(--space-1);
 }

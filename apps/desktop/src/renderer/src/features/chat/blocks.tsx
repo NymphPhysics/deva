@@ -5,6 +5,7 @@ import {
   Check,
   ChevronDown,
   ChevronRight,
+  Eye,
   FileText,
   FolderTree,
   FilePen,
@@ -69,6 +70,7 @@ import { CopyButton, Markdown } from './Markdown'
 import { AUTO_SHAPE, HumationFace, PersonaFace, USER_AVATAR_SEED } from '../../components/humation'
 import { useProfile } from '../../store/profile'
 import { TaskConfirmCard } from './TaskConfirmCard'
+import { openFilePreview, previewSessionId } from './preview'
 import { DeliverablesCard } from './DeliverablesCard'
 import { TodoItemList } from './Todos'
 
@@ -230,12 +232,18 @@ function usageObject(args: unknown, t?: (key: string) => string): { text: string
   return { text, full: text }
 }
 
+/** 预览面板的标题用：read_file 那次调用的 path 末段（路径可能是相对的，只取文件名）。 */
+function fileNameOf(step: ToolStep): string {
+  const p = (step.args as { path?: unknown } | null)?.path
+  if (typeof p !== 'string') return step.name
+  return p.split(/[\\/]/).pop() || p
+}
+
 function flowObject(
   name: string,
   args: unknown,
   t?: (key: string) => string
-): { text: string; full: string } | null {
-  if (!TOOL_META[name]) return { text: name, full: name }
+): { text: string; full: string } | null {  if (!TOOL_META[name]) return { text: name, full: name }
   if (name === 'browser') return browserObject(args)
   if (name === 'tool_search') return usageObject(args, t)
   if (name === 'skill') {
@@ -1370,7 +1378,7 @@ function verbKey(name: string, args?: unknown): string {
   return toolMeta(name, args)?.key ?? 'unknown'
 }
 
-type ToolStep = { name: string; args: unknown; status: ToolStatus; summary?: string }
+type ToolStep = { id: string; name: string; args: unknown; status: ToolStatus; summary?: string }
 
 const isFailed = (status: ToolStatus): boolean => status === 'error' || status === 'denied'
 
@@ -1455,6 +1463,8 @@ function TimelineTool({ step }: { step: ToolStep }): React.JSX.Element {
   const [open, setOpen] = useState(false)
   const state = step.status === 'running' ? ' is-run' : isFailed(step.status) ? ' is-err' : ''
   const command = step.name === 'run_command' ? flowObject(step.name, step.args)?.full : undefined
+  // read_file 成功时可预览读取结果（文本/图片/markdown，见 FilePreview.tsx）。会话 id 取自模块级总线。
+  const previewable = step.name === 'read_file' && !isFailed(step.status)
   let title = stepTitle(step, t)
   // 技能行里只写技能名：悬停另起一行附上技能说明（按名称或文件夹名匹配，同主进程 skill 工具）。
   if (step.name === 'skill' && !isFailed(step.status)) {
@@ -1462,6 +1472,22 @@ function TimelineTool({ step }: { step: ToolStep }): React.JSX.Element {
     const desc = skills.find((s) => s.name.toLowerCase() === wanted || s.id.toLowerCase() === wanted)?.desc.trim()
     if (title && desc) title = `${title}\n${desc}`
   }
+  // 预览键与「点开看命令」共用同一行右侧的窄键位：图标一键，不占文字。
+  const previewBtn = previewable ? (
+    <button
+      type="button"
+      className="tl__preview"
+      title={t('chat.preview.open')}
+      aria-label={t('chat.preview.open')}
+      onClick={(e) => {
+        e.stopPropagation()
+        const sid = previewSessionId()
+        if (sid) openFilePreview({ sessionId: sid, toolUseId: step.id, name: fileNameOf(step) })
+      }}
+    >
+      <Eye size={12} />
+    </button>
+  ) : null
   if (!command)
     return (
       <li className={`tl__item${state}`}>
@@ -1469,6 +1495,7 @@ function TimelineTool({ step }: { step: ToolStep }): React.JSX.Element {
         <div className="tl__main">
           <div className="tl__line" title={title}>
             <ToolText step={step} />
+            {previewBtn}
           </div>
         </div>
       </li>

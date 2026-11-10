@@ -28,8 +28,11 @@
   position: relative; /* 侧栏拖拽手柄的定位锚 */
   display: grid;
   /* 首列图标栏宽由 --cf-rail-w 驱动（macOS 红绿灯可见时加宽，见 resizable.tsx ICONRAIL_W_MAC）；
-     第二列（对话面板）宽由 --cf-side 驱动：可拖动，JS 侧已按上下限与窗口宽夹取。 */
-  grid-template-columns: var(--cf-rail-w, 56px) var(--cf-side, 300px) minmax(0, 1fr);
+     第二列（对话面板）宽由 --cf-side 驱动：可拖动，JS 侧已按上下限与窗口宽夹取。
+     第四列是侧栏（/side）：关闭时为 0 宽（彻底不占位），打开时由 --cf-side-r 给出宽度。 */
+  grid-template-columns:
+    var(--cf-rail-w, 56px) var(--cf-side, 300px) minmax(0, 1fr)
+    var(--cf-side-r, 0px);
   min-height: 0;
   /* 收起 / 展开会话列表时列宽平滑过渡；拖动手柄时关掉，免得宽度追着光标慢半拍 */
   transition: grid-template-columns 0.16s ease;
@@ -2465,6 +2468,63 @@ body.cf-resizing-y * {
   align-items: center;
   gap: var(--space-1);
   margin-top: var(--space-2);
+}
+/* 上下文用量 chip（输入框工具条）：环画 used/压缩线，不是 used/窗口 —— 后者永远看着宽裕。
+   接近压缩线转黄、越过转红，读数靠字符估算时整体弱化并加 ~。 */
+.cf-ctxchip {
+  gap: 6px;
+}
+.cf-ctxchip svg {
+  flex: none;
+}
+.cf-ctxchip__track {
+  fill: none;
+  stroke: var(--border-strong, var(--border));
+  stroke-width: 2;
+}
+.cf-ctxchip__fill {
+  fill: none;
+  stroke: var(--accent);
+  stroke-width: 2;
+  stroke-linecap: round;
+  transition: stroke-dashoffset 0.3s ease;
+}
+.cf-ctxchip.is-warm .cf-ctxchip__fill {
+  stroke: var(--warning, #d99a2b);
+}
+.cf-ctxchip.is-hot .cf-ctxchip__fill {
+  stroke: var(--danger, #d9534f);
+}
+.cf-ctxchip.is-est {
+  color: var(--fg-subtle);
+}
+.cf-ctxchip.is-est .cf-ctxchip__fill {
+  opacity: 0.5;
+}
+.cf-ctxchip__rows {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px 12px 4px;
+}
+.cf-ctxchip__row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--space-3);
+  font-size: 12px;
+  color: var(--fg-muted);
+}
+.cf-ctxchip__row b {
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+  color: var(--fg);
+}
+.cf-ctxchip__hint {
+  padding: 4px 12px 10px;
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--fg-subtle);
 }
 /* 任务表单：指令输入采用与对话输入框同款内嵌盒（.cf-box），但更高、不可拖拽
    （.cf-box textarea 已 resize:none）、去阴影；底部工具条内嵌人格 / 模型 chip 选择器（靠右对齐）。 */

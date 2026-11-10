@@ -98,7 +98,8 @@ export function compactionConfig(): CompactionCfg {
 }
 
 /** 窗口 / 输出上限的取值依据：协议（定「自动」输出上限）+ 服务商 + 模型 ID（查用户覆盖值）。 */
-type LimitModelRef = Pick<CompactModelConfig, 'adapter' | 'providerId' | 'model'>
+/** 只是「算上下文上限」所需的模型标识（与完整 ChatModelConfig 解耦）。 */
+export type LimitModelRef = Pick<CompactModelConfig, 'adapter' | 'providerId' | 'model'>
 
 /**
  * 进程内记住的真实窗口（键 `providerId:model`）：服务商报「上下文超限」时从报错里解析出的上限
@@ -146,6 +147,35 @@ function triggerTokens(model: LimitModelRef, cfg: CompactionCfg): number {
     OUTPUT_RESERVE_UNKNOWN
   const byWindow = window - Math.min(output, window / 2) - Math.min(COMPACT_BUFFER, window * 0.1)
   return cfg.triggerRatio !== undefined ? Math.min(window * cfg.triggerRatio, byWindow) : byWindow
+}
+
+/**
+ * 界面用的上下文占用快照（输入框上方那个 chip）。
+ * 与 needsCompaction **同一套优先级**：有真实 usage 就用它，缺失（刚压缩 / 刚删轮 / 冷启动）才回退字符估算
+ * ——两边各算一套会出现「界面说还很宽裕、实际已经该压了」的分裂。
+ * trigger 是压缩触发线而非窗口：窗口扣除输出上限与估算余量之后才是真正的可用输入量，
+ * 拿 used/window 去画进度条会永远显得宽松，掩盖真实的压缩时机。
+ */
+export interface ContextUsage {
+  used: number
+  trigger: number
+  window: number
+  /** used 是否来自模型返回的真实 usage；false = 字符估算（界面显示为「约」）。 */
+  exact: boolean
+}
+
+export function contextUsage(
+  session: StoredSession,
+  model: LimitModelRef,
+  cfg: CompactionCfg = compactionConfig()
+): ContextUsage {
+  const exact = typeof session.lastInputTokens === 'number' && session.lastInputTokens > 0
+  return {
+    used: exact ? (session.lastInputTokens as number) : estimateTokens(session.messages),
+    trigger: triggerTokens(model, cfg),
+    window: contextWindowFor(model, cfg),
+    exact
+  }
 }
 
 // ── token 估算（字符法，中日韩文字另计；图片/文档按固定成本，规避 base64 数长度失真）──────

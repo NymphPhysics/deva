@@ -96,6 +96,17 @@ export interface StoredSession {
    */
   parentId?: string
   /**
+   * 侧栏会话（/side 侧边提问）所属的主对话 id。与 parentId 互斥、语义不同：
+   * parentId = 项目成员，会往主对话交差、进成员名单、通知路由到主对话；
+   * sideOf = 「挂在主对话旁边的一次提问」，只有一次性的主对话快照作背景，**输出绝不回写主对话**，
+   * 也不进左侧列表 / 手机端列表，删除主对话时一并删除。
+   */
+  sideOf?: string
+  /** 侧栏会话首次发消息时是否已注入过主对话快照（注入一次即置位，之后独立演进）。 */
+  sideContextSent?: boolean
+  /** 侧栏是从哪段文字发起提问的（用户选中内容），只用于侧栏头部展示，不参与上下文组装。 */
+  sideSelection?: string
+  /**
    * 角色名片（propose_agent 提议）的终态边车，按 toolUseId 记录 accepted/rejected。
    * 名片本体随 Message[] 天然存活，但其接受/拒绝终态无处落——此边车确保重开不退回 pending、
    * 不重复建角色。pending 不入表（缺省即 pending）。见 chat.ts:chat:resolve-proposal。
@@ -193,6 +204,25 @@ export interface StoredSession {
    * 注入即清空（展示层取最后一个 text 块，故不出现在气泡里）。
    */
   restoreNote?: string
+  /**
+   * 标题自动校正的状态边车（见 services/title.ts）。缺省 = 从未校正过——旧对话天然落到默认值，无需迁移。
+   * 不放进 ChatSessionMeta：左侧列表只要 title 本身，把这些计数塞进 _index.json 只会白占体积。
+   */
+  titleAuto?: TitleAuto
+}
+
+/** 标题自动校正的状态（StoredSession.titleAuto）。见 services/title.ts。 */
+export interface TitleAuto {
+  /** 已完成的轮数（每轮结束 +1）。**不靠数消息得出**：压缩会抹掉早期轮，数出来会倒退。 */
+  turns: number
+  /** 上次成功改名的轮号（改名后至少间隔几轮才再检查）。 */
+  renamedAt?: number
+  /** 已成功校正过至少一次（此后只在「主要话题确实变了」时才改，不为换措辞而改）。 */
+  corrected?: boolean
+  /** 我们最后一次自动写入的标题：与当前 title 不一致 = 标题被别处改过，据此停手。 */
+  applied?: string
+  /** 用户在应用内手改过（chat:rename-session 非空写入）。keep 策略下一置位就永不再自动改。 */
+  manual?: boolean
 }
 
 /** 回合终态提示（持久化边车项）。见 StoredSession.notices。 */
@@ -225,6 +255,23 @@ export interface ChatSessionMeta {
   members?: MemberRef[]
   /** 成员会话所属的主对话 id。见 StoredSession.parentId。 */
   parentId?: string
+  /** 侧栏会话所属的主对话 id。见 StoredSession.sideOf。 */
+  sideOf?: string
+  /**
+   * 上下文占用快照。**只在 chat:list-sessions 出口临时附加**，不写进 _index.json
+   * （会过期的数字落进索引，重启后就显示上一轮的旧读数）。
+   */
+  context?: ContextSnapshot
+}
+
+/** 上下文占用快照（与 services/compaction.ts 的 ContextUsage 同构）。 */
+export interface ContextSnapshot {
+  used: number
+  /** 压缩触发线（窗口扣掉输出上限与估算余量），进度条按它与 used 的比画。 */
+  trigger: number
+  window: number
+  /** used 是否来自模型返回的真实 usage；false = 字符估算，界面显示为「约」。 */
+  exact: boolean
 }
 
 /**
@@ -281,7 +328,8 @@ function metaOf(s: StoredSession): ChatSessionMeta {
     effort: s.effort,
     archived: s.archived,
     ...(s.members?.length ? { members: s.members } : {}),
-    ...(s.parentId ? { parentId: s.parentId } : {})
+    ...(s.parentId ? { parentId: s.parentId } : {}),
+    ...(s.sideOf ? { sideOf: s.sideOf } : {})
   }
 }
 
@@ -497,7 +545,17 @@ export function deleteSession(id: string): void {
   removeToolResults(safeId(id))
 }
 
-/** 从首条用户文本派生标题（单行、截断）。 */
+/**
+ * 对话标题长度上限（列表里单行省略显示，再长也看不全）。
+ * 放在此处而非 chat.ts：services/title.ts 也要用它，而它不能反过来 import chat.ts（会成环）。
+ */
+export const TITLE_MAX = 100
+
+/**
+ * 从首条用户文本派生标题（单行、截断）。
+ * 只是**首帧能看的临时标题**：首条消息往往只是试探性提问或贴一段报错，聊明白后多半不再贴切，
+ * 后续由 services/title.ts 按节奏请模型校正（见 StoredSession.titleAuto）。
+ */
 export function deriveTitle(text: string): string {
   const oneLine = text.replace(/\s+/g, ' ').trim()
   if (!oneLine) return ''

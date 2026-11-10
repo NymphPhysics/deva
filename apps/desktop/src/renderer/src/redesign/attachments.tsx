@@ -13,7 +13,11 @@ import type { AttachKind } from '../store/chat'
  */
 
 /** 图片从哪取。 */
-export type ImageSource = { path: string } | { sessionId: string; ref: string }
+export type ImageSource =
+  | { path: string }
+  | { sessionId: string; ref: string }
+  /** 已经是 data URI（工具结果里的图片，主进程直接给出，无需再取）。 */
+  | { url: string }
 
 /** 一张可点开的图片。 */
 export interface ViewerItem {
@@ -33,14 +37,18 @@ const thumbDone = new Map<string, string | null>()
 const ratios = new Map<string, number>()
 
 function sourceKey(src: ImageSource): string {
-  return 'path' in src ? `p:${src.path}` : `r:${src.sessionId}:${src.ref}`
+  if ('path' in src) return `p:${src.path}`
+  if ('url' in src) return `u:${src.url.slice(0, 64)}:${src.url.length}`
+  return `r:${src.sessionId}:${src.ref}`
 }
 
 function fetchImage(src: ImageSource, full: boolean): Promise<string | null> {
   const p =
     'path' in src
       ? window.deva.fs.attachmentImage(src.path, full)
-      : window.deva.chat.attachmentImage(src.sessionId, src.ref, full)
+      : 'url' in src
+        ? Promise.resolve(src.url)
+        : window.deva.chat.attachmentImage(src.sessionId, src.ref, full)
   return p.catch(() => null)
 }
 

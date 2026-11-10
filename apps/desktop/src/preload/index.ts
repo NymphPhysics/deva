@@ -143,9 +143,19 @@ export interface AttachmentChip {
   ref?: string
 }
 
+/** 某次工具调用的原始结果（文件预览用，与 services/chat.ts 的 ToolResultView 对齐）。 */
+export interface ToolResultView {
+  name: string
+  /** 调用时给的路径（可能是相对路径，只用于显示与判类型）。 */
+  path: string
+  text: string
+  /** 图片结果，data URI。 */
+  images: string[]
+  isError: boolean
+}
+
 /** 会话元信息（左侧列表用，与 chat-store.ts 对齐）。 */
-export interface ChatSessionMeta {
-  id: string
+export interface ChatSessionMeta {  id: string
   title: string
   createdAt: number
   updatedAt: number
@@ -163,6 +173,15 @@ export interface ChatSessionMeta {
   members?: MemberMeta[]
   /** 成员会话所属的主对话 id（成员会话不进左侧列表，故列表里的对话恒无此字段）。 */
   parentId?: string
+  /** 侧栏会话所属的主对话 id（侧栏会话同样不进左侧列表）。 */
+  sideOf?: string
+  /** 上下文占用快照（只在 chat:list-sessions 出口附加，不落盘）。 */
+  context?: {
+    used: number
+    trigger: number
+    window: number
+    exact: boolean
+  }
 }
 
 /** 项目成员（与 services/members.ts 的 MemberRef 对齐）。 */
@@ -1122,14 +1141,29 @@ const api = {
     /** 对话记录里的图片附件（ref 见 AttachmentChip）：缩略图，full 为 true 时取原图（data URI）；对不上为 null */
     attachmentImage: (sessionId: string, ref: string, full = false): Promise<string | null> =>
       ipcRenderer.invoke('chat:attachment-image', sessionId, ref, full),
+    /**
+     * 某次 read_file 调用的原始结果（文件预览用）。只从对话历史里取、且只认 read_file，
+     * 渲染层给不了任意路径 —— 不是新的读盘口子。找不到 / 不是 read_file 时为 null。
+     */
+    toolResult: (sessionId: string, toolUseId: string): Promise<ToolResultView | null> =>
+      ipcRenderer.invoke('chat:tool-result', sessionId, toolUseId),
     /** 载入历史 + 进行中回合的 turnId（同一时刻取出，用于接上别处发起、仍在跑的一轮） */
     /** 接上某会话：历史 + 进行中的回合（turnId 与开始时刻 startedAt，空闲时都为 null）。 */
     attachSession: (
       sessionId: string
     ): Promise<{ messages: DisplayMessage[]; turnId: string | null; startedAt: number | null }> =>
       ipcRenderer.invoke('chat:attach-session', sessionId),
-    /** 删除某会话（主对话连同它的成员会话一并删除） */
-    deleteSession: (sessionId: string, workspaceRoot: string | null): Promise<{ ok: true }> =>
+    /**
+     * 开一条侧栏会话（/side 侧边提问）：独立会话，sideOf 指向主对话。
+     * 侧栏的问答与主对话相互隔离，输出不写回主对话；首轮会带一份主对话最近几轮的快照作背景。
+     */
+    createSide: (payload: {
+      sessionId: string
+      mainId: string
+      selection?: string
+      title?: string
+    }): Promise<{ ok: true }> => ipcRenderer.invoke('chat:create-side', payload),
+    /** 删除某会话（主对话连同它的成员会话一并删除） */    deleteSession: (sessionId: string, workspaceRoot: string | null): Promise<{ ok: true }> =>
       ipcRenderer.invoke('chat:delete-session', sessionId, workspaceRoot),
     /** 移除主对话的一个成员（不再派任务，进行中的任务中止，成员会话保留）。 */
     removeMember: (sessionId: string, memberSessionId: string): Promise<{ ok: boolean }> =>

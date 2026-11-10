@@ -46,6 +46,7 @@ import {
   Info,
   Lightbulb,
   ListChecks,
+  PanelRight,
   ListFilter,
   Lock,
   MessageCircle,
@@ -77,6 +78,7 @@ import { UpdateSection } from './UpdateSection'
 // 关于页的应用图标：直接用安装包图标的源文件，图形只维护一份
 import devaIcon from '../../../../build/icon.svg'
 import './redesign.css'
+import './sidepanel.css'
 import type { McpKV, McpServer, McpStatus, Persona, Skill } from '../mock/extensions'
 import type {
   EffortLevel,
@@ -125,6 +127,7 @@ import {
   type EffortAdapter
 } from '../../../shared/effort'
 import { NEW_MEMBER_TOKENS, mentionRanges } from '../../../shared/mention'
+import { formatTokens } from '../../../shared/context'
 import { useTasks } from '../store/tasks'
 import { useI18n } from '../i18n/i18n'
 import { useDialog } from '../components/DialogProvider'
@@ -138,6 +141,7 @@ import {
   ResizeHandle,
   SIDEBAR_COLLAPSE_AT,
   SIDEBAR_DEFAULT,
+  SIDE_PANEL_W,
   clampComposer,
   clampSidebar,
   loadLayout,
@@ -179,6 +183,9 @@ import { ModelSettings } from '../features/settings/ModelSettings'
 import { AvatarEditor } from './AvatarEditor'
 import { ProfilePanel } from './ProfilePanel'
 import { RewindModal } from './RewindModal'
+import { FilePreviewHost } from '../features/chat/FilePreview'
+import { setPreviewSession } from '../features/chat/preview'
+import { SidePanel } from './SidePanel'
 import { useProfile } from '../store/profile'
 
 /**
@@ -374,7 +381,8 @@ export function ChatFirstShell(): React.JSX.Element {
     respondMount,
     pendingCards,
     removeMember,
-    onInsertsReturned
+    onInsertsReturned,
+    side
   } = useChat()
   const { personas, remove, reorderPersonas } = useExtensions()
   const { tasks, setStatus: setTaskStatus, runNow: runTaskNow, update: updateTask } = useTasks()
@@ -390,6 +398,8 @@ export function ChatFirstShell(): React.JSX.Element {
   useEffect(() => onInsertsReturned(restoreToComposer), [onInsertsReturned])
 
   const [railTab, setRailTab] = useState<RailTab>('chats')
+  // 侧栏开着时把主对话区收窄一档：默认宽度下两栏并排才不显得走廊太窄。
+  const sideOpen = !!side.id
   // 图标栏「对话」按钮的红点：其他对话有新消息或待你处理时亮起（与头像红点同口径）。只认列表里看得到的对话：
   // 删除正在跑的对话时回合被中止，随后的 done 仍会给它记一条未读；已归档的不再提醒（含仍待确认的名片）。
   // 不过滤就成了点开找不到的红点。
@@ -853,7 +863,10 @@ export function ChatFirstShell(): React.JSX.Element {
           {
             '--cf-rail-w': `${railW}px`,
             '--cf-side': `${collapsed ? 0 : sidebarShown}px`,
-            '--cf-side-open': `${sidebarShown}px`
+            '--cf-side-open': `${sidebarShown}px`,
+            // 侧栏宽度（第 4 列）：没开就是 0 —— 网格列直接塌掉，不占位也不留缝。
+            // 侧栏只在对话页出现（机器人 / 定时任务是独立管理面，没有「主对话」可挂）。
+            '--cf-side-r': `${sideOpen && railTab === 'chats' && !noThreads ? SIDE_PANEL_W : 0}px`
           } as React.CSSProperties
         }
       >
@@ -968,6 +981,7 @@ export function ChatFirstShell(): React.JSX.Element {
                 onOpenProposal={openProposal}
                 onOpenAutotask={openAutotask}
                 onDeleteTurns={deleteTurnsWithConfirm}
+                onSide={(selection) => void side.open(selection)}
                 archived={!!railSessions.find((s) => s.id === currentSessionId)?.archived}
                 onUnarchive={() => setArchived(currentSessionId, false)}
                 attention={sessionStates[currentSessionId]?.attention ?? false}
@@ -1015,6 +1029,8 @@ export function ChatFirstShell(): React.JSX.Element {
             )}
           </>
         )}
+        {/* 侧栏（/side 侧边提问）：网格第 4 列，关着时该列宽为 0。只在对话页渲染。 */}
+        {railTab === 'chats' && !noThreads && side.id && <SidePanel />}
       </div>
 
       {editor && <PersonaEditor initial={editor} onClose={() => setEditor(null)} />}
@@ -4633,6 +4649,7 @@ function Conversation({
   onOpenProposal,
   onOpenAutotask,
   onDeleteTurns,
+  onSide,
   archived,
   onUnarchive,
   attention,
@@ -4674,6 +4691,8 @@ function Conversation({
   onOpenAutotask: (taskId: string) => void
   /** 按「轮」删除选中轮次（含破坏性确认）；返回是否已删（true=退出选择态并清空选择）。 */
   onDeleteTurns: (turnIndices: number[]) => Promise<boolean>
+  /** 打开侧栏（/side 与右键「就此提问」）。 */
+  onSide: (selection?: string) => void
   /** 当前对话已归档：标题栏显示「已归档」与「移回对话列表」。 */
   archived: boolean
   onUnarchive: () => void
@@ -5080,6 +5099,11 @@ function Conversation({
     if (el) el.scrollTop = el.scrollHeight
   }, [currentSessionId])
 
+  // 登记当前会话 id：时间轴里的工具步骤（read_file 的预览键）拿不到 prop，要按会话去取那次调用的结果。
+  useEffect(() => {
+    setPreviewSession(currentSessionId)
+  }, [currentSessionId])
+
   // 换了渲染范围或消息整份重建后（刚打开 / 刚补过一段 / 刚跳转 / 删轮后）离边缘仍不远（内容填不满一屏等）：
   // 接着补，直到够滚动或到头。排在上面两个滚到底的副作用之后，量的是落位后的位置。
   useEffect(() => {
@@ -5384,6 +5408,12 @@ function Conversation({
                     label: t('common.copy'),
                     icon: <Copy size={14} />,
                     onClick: () => copySelection(ctxMenu.selection)
+                  },
+                  // 就选中的这段在侧栏提问：不动主对话（隔离的第二次对话，见 SidePanel）。
+                  {
+                    label: t('cf.side.askSelection'),
+                    icon: <PanelRight size={14} />,
+                    onClick: () => onSide(ctxMenu.selection)
                   }
                 ]
               : []),
@@ -5446,6 +5476,7 @@ function Conversation({
           showJump={!atBottom && messages.length > 0}
           onJump={jumpToLatest}
           onRewind={() => openRewind()}
+          onSide={onSide}
           prefill={prefill}
           onPrefillConsumed={onPrefillConsumed}
           above={
@@ -5472,6 +5503,8 @@ function Conversation({
           onPrefill={onPrefill}
         />
       )}
+      {/* 文件预览覆盖层：入口在时间轴的工具步骤里（见 features/chat/preview.ts 的总线）。 */}
+      <FilePreviewHost />
     </main>
   )
   // 执行步骤里成员名前的小头像（见 blocks.tsx MemberFaceContext）；成员对话里没有成员工具，不提供。
@@ -6190,6 +6223,7 @@ function Composer({
   showJump,
   onJump,
   onRewind,
+  onSide,
   prefill,
   onPrefillConsumed,
   above
@@ -6212,6 +6246,8 @@ function Composer({
   onJump: () => void
   /** 打开检查点回滚面板（/rewind、双击 Esc）；返回 false 表示此刻不可用（未打开）。 */
   onRewind: () => boolean
+  /** 打开侧栏（/side 与右键「就此提问」）：selection 为选中的那段文字，空 = 只是打开。 */
+  onSide: (selection?: string) => void
   prefill: { text: string; nonce: number } | null
   onPrefillConsumed: () => void
   /** 胶囊排之上、与输入盒同宽的一块（主对话里成员在等你处理的通知行，见 MemberWaits）。 */
@@ -6264,7 +6300,8 @@ function Composer({
   const slashCommands = useMemo<SlashCommand[]>(() => {
     const out: SlashCommand[] = [
       { name: 'compact', desc: t('cf.slash.compact'), kind: 'command' },
-      { name: 'rewind', desc: t('cf.slash.rewind'), kind: 'command' }
+      { name: 'rewind', desc: t('cf.slash.rewind'), kind: 'command' },
+      { name: 'side', desc: t('cf.slash.side'), kind: 'command' }
     ]
     const seen = new Set(out.map((c) => c.name.toLowerCase()))
     for (const s of skills) {
@@ -6471,8 +6508,8 @@ function Composer({
   // 插入当前轮：清空输入框交给主进程，当前步骤结束后送达；没插进去（原因已 toast）就把文字放回。
   const insertNow = (): void => {
     const text = composer.getText()
-    // /compact、/rewind 是本地指令，回合进行中用不了，也不该当成消息插进去。
-    if (!text.trim() || /^\/(compact|rewind)$/i.test(text.trim())) return
+    // /compact、/rewind、/side 是本地指令，回合进行中用不了，也不该当成消息插进去。
+    if (!text.trim() || /^\/(compact|rewind|side)(?:[ \t]+[\s\S]*)?$/i.test(text.trim())) return
     const sid = sessionId
     insertedAtRef.current = Date.now()
     composer.setText('')
@@ -6490,6 +6527,16 @@ function Composer({
     const text = composer.getText()
     const atts = pending.filter((p) => p.supported)
     if (!text.trim() && atts.length === 0) return
+    // /side 纯渲染层指令：打开右侧侧栏（带文字则作为这次提问的由头），不发消息。
+    // 与 /rewind 同构；真正开合由 ChatFirstShell 订阅 side.ts 的总线执行（要用 store 里的 side.open）。
+    const sideMatch = /^\/side(?:[ \t]+([\s\S]*))?$/i.exec(text.trim())
+    if (sideMatch && atts.length === 0) {
+      // 直接走 prop，不经模块总线：总线的订阅生命周期与渲染耦合，曾出现「订阅在重渲染的空档被
+      // 拆掉、请求静默丢失」的失效（表现为输入 /side 毫无反应）。同一文件内的父子传参最可靠。
+      onSide(sideMatch[1]?.trim() || undefined)
+      composer.setText('')
+      return
+    }
     // /rewind 纯渲染层指令：打开回滚面板、不发消息；此刻不可用则原样留在输入框。
     if (text.trim().toLowerCase() === '/rewind' && atts.length === 0) {
       if (onRewind()) composer.setText('')
@@ -6535,8 +6582,18 @@ function Composer({
         return true
       }
       if (key === 'tab' || (plain && key === 'enter')) {
-        e.preventDefault()
         const pick = slashMatches[slashCur]
+        // 输入已经就是那个候选本身（`/side` 打完、候选里也有 `/side`）：Enter 应当是「发送」，
+        // 而不是把内容补全成 `/side ` 再让用户按第二次——那样看起来就是「按了没反应」。
+        // 判定用整条输入与候选名的比较；`/side 问题` 这种带参数的写法本就不等于候选名，照常走补全。
+        const typed = input.trim().toLowerCase()
+        const whole = pick && (typed === `/${pick.name.toLowerCase()}` || typed === `@${pick.name.toLowerCase()}`)
+        if (whole) {
+          e.preventDefault()
+          submit()
+          return true
+        }
+        e.preventDefault()
         if (pick) applySlash(pick)
         return true
       }
@@ -6564,12 +6621,14 @@ function Composer({
     return true
   }
 
-  // 开头 `/name` 会不会生效（决定是否上色）：/compact、/rewind 须整条只有它且无附件（同 submit 与 store 的拦截）；
-  // 其余按本角色可用技能的显示名或文件夹名、不分大小写匹配（同主进程 loadSkillInstructionsByName）。
+  // 开头 `/name` 会不会生效（决定是否上色）：/compact、/rewind、/side 须整条只有它（/side 可带一段提问文字）
+  // 且无附件（同 submit 与 store 的拦截）；其余按本角色可用技能的显示名或文件夹名、不分大小写匹配
+  // （同主进程 loadSkillInstructionsByName）。
   const noAtts = supported.length === 0
   const isToken = (name: string, whole: string): boolean => {
     const n = name.toLowerCase()
-    if ((n === 'compact' || n === 'rewind') && noAtts && whole.toLowerCase() === `/${n}`) return true
+    if (noAtts && (n === 'compact' || n === 'rewind') && whole.toLowerCase() === `/${n}`) return true
+    if (noAtts && n === 'side' && /^\/side(?:[ \t]+[\s\S]*)?$/i.test(whole.trim())) return true
     return skills.some((s) => s.enabled && (s.name.toLowerCase() === n || s.id.toLowerCase() === n))
   }
   // 正文里会做成成员标签的 `@名字`：本对话成员、可 @ 的角色，以及「新建成员」的标记（几种写法都认，同主进程
@@ -6800,6 +6859,7 @@ function Composer({
             )}
             <ModelPicker />
             <EffortPicker />
+            <ContextMeter />
             {/* 回合进行中只有一枚键：输入框有文字＝「发送」（插入当前轮），空＝「停止」（只放图标，与发送同宽不跳动）。
                 有文字时不出停止，要停先清空输入框。 */}
             {streaming ? (
@@ -6937,8 +6997,96 @@ function ModelPicker(): React.JSX.Element {
  * 只列本对话生效模型支持的档（模型能力内置表，见 shared/effort.ts）；模型不支持思考等级则整个隐藏。
  * 「默认」= 不发任何思考参数；各档如何映射到各家协议、不支持时如何自愈，见主进程 providers/* 与 chat.ts。
  */
-function EffortPicker(): React.JSX.Element | null {
+/**
+ * 上下文用量（输入框工具条上的小环 + 字数）。
+ * 环画的是 **used / 触发线**，不是 used / 窗口：窗口扣掉输出上限与估算余量才是真正能用的输入量，
+ * 拿窗口当分母会永远看着宽裕，掩盖真实的压缩时机（判定见 services/compaction.ts 的 triggerTokens）。
+ * 读数缺失（刚压缩 / 刚删轮 / 没配好模型）时不渲染，而不是显示 0。
+ */
+function ContextMeter(): React.JSX.Element | null {
   const { t } = useI18n()
+  const { contextUsage } = useChat()
+  const [open, setOpen] = useState(false)
+  if (!contextUsage) return null
+  const { used, trigger, window: win, exact } = contextUsage
+  const ratio = trigger > 0 ? used / trigger : 0
+  const left = Math.max(0, trigger - used)
+  const tone = ratio >= 1 ? ' is-hot' : ratio >= 0.8 ? ' is-warm' : ''
+  const r = 6
+  const c = 2 * Math.PI * r
+  return (
+    <div className="model-pick">
+      <button
+        className={`chip cf-ctxchip${tone}${exact ? '' : ' is-est'}`}
+        type="button"
+        title={t('cf.ctx.title')
+          .replace('{used}', formatTokens(used))
+          .replace('{trigger}', formatTokens(trigger))
+          .replace('{window}', formatTokens(win))
+          .replace('{left}', formatTokens(left))}
+        aria-label={t('cf.ctx.title')
+          .replace('{used}', formatTokens(used))
+          .replace('{trigger}', formatTokens(trigger))
+          .replace('{window}', formatTokens(win))
+          .replace('{left}', formatTokens(left))}
+        onClick={() => setOpen((v) => !v)}
+      >
+        <svg width="16" height="16" viewBox="0 0 16 16" aria-hidden>
+          <circle cx="8" cy="8" r={r} className="cf-ctxchip__track" />
+          <circle
+            cx="8"
+            cy="8"
+            r={r}
+            className="cf-ctxchip__fill"
+            strokeDasharray={c}
+            strokeDashoffset={c * (1 - Math.min(1, Math.max(0, ratio)))}
+            transform="rotate(-90 8 8)"
+          />
+        </svg>
+        <span className="chip__label">
+          {exact ? '' : '~'}
+          {formatTokens(used)}
+        </span>
+      </button>
+      {open && (
+        <>
+          <div className="model-pick__backdrop" onClick={() => setOpen(false)} />
+          <div className="model-pick__menu" role="menu">
+            <div className="model-pick__group">
+              <div className="model-pick__group-head">
+                <span className="model-pick__group-name">{t('cf.ctx.titleLabel')}</span>
+              </div>
+              <div className="cf-ctxchip__rows">
+                <div className="cf-ctxchip__row">
+                  <span>{t('cf.ctx.used')}</span>
+                  <b>
+                    {exact ? '' : '~'}
+                    {formatTokens(used)}
+                  </b>
+                </div>
+                <div className="cf-ctxchip__row">
+                  <span>{t('cf.ctx.trigger')}</span>
+                  <b>{formatTokens(trigger)}</b>
+                </div>
+                <div className="cf-ctxchip__row">
+                  <span>{t('cf.ctx.window')}</span>
+                  <b>{formatTokens(win)}</b>
+                </div>
+                <div className="cf-ctxchip__row">
+                  <span>{t('cf.ctx.left')}</span>
+                  <b>{formatTokens(left)}</b>
+                </div>
+              </div>
+              <div className="cf-ctxchip__hint">{t('cf.ctx.hint')}</div>
+            </div>
+          </div>
+        </>
+      )}
+    </div>
+  )
+}
+
+function EffortPicker(): React.JSX.Element | null {  const { t } = useI18n()
   const { activeEffort, setActiveEffort, activeModel, providers } = useModels()
   const { currentBinding, setSessionEffort } = useChat()
   const [open, setOpen] = useState(false)
@@ -7495,6 +7643,7 @@ function GeneralPane(): React.JSX.Element {
     setChatFontSize(next)
     saveChatFontSize(next)
   }
+  const titleCfg = useTitleConfig()
   return (
     <>
       <h2 className="cf-pane__title">{t('settings.general')}</h2>
@@ -7544,6 +7693,120 @@ function GeneralPane(): React.JSX.Element {
             </div>
             <Toggle on={closeToTray} onChange={toggleTray} />
           </div>
+        )}
+      </div>
+      <AutoTitleSettings cfg={titleCfg} />
+    </>
+  )
+}
+
+/** config.json 的 `title` 段（与 main/services/title.ts 的 TitleCfg 同构；缺省即默认值）。 */
+interface TitleCfgView {
+  enabled: boolean
+  every: number
+  lang: 'auto' | 'zh' | 'en'
+  model: string
+}
+
+const TITLE_DEFAULTS: TitleCfgView = { enabled: true, every: 4, lang: 'auto', model: '' }
+
+/**
+ * 读 `title` 段并给出一份「整块写回」的更新器。
+ * `config:set` 是**顶层浅合并**，故这里每次都带上完整对象——只写一个字段会把其余字段抹掉。
+ * 主进程那侧对非法值一律回退默认，此处的规整只是为了让界面显示与落盘值一致。
+ */
+function useTitleConfig(): {
+  cfg: TitleCfgView
+  update: (patch: Partial<TitleCfgView>) => void
+} {
+  const [cfg, setCfg] = useState<TitleCfgView>(() => {
+    const raw = window.deva?.config?.getSync?.().title as Partial<TitleCfgView> | undefined
+    return {
+      enabled: typeof raw?.enabled === 'boolean' ? raw.enabled : TITLE_DEFAULTS.enabled,
+      every: typeof raw?.every === 'number' && raw.every >= 1 ? raw.every : TITLE_DEFAULTS.every,
+      lang: raw?.lang === 'zh' || raw?.lang === 'en' ? raw.lang : TITLE_DEFAULTS.lang,
+      model: typeof raw?.model === 'string' ? raw.model : TITLE_DEFAULTS.model
+    }
+  })
+  const update = (patch: Partial<TitleCfgView>): void => {
+    setCfg((prev) => {
+      const next = { ...prev, ...patch }
+      void window.deva?.config?.set?.({ title: next })
+      return next
+    })
+  }
+  return { cfg, update }
+}
+
+/** 「自动校正对话标题」设置区：开关、检查间隔、标题语言、判断模型。默认值是主进程那一份。 */
+function AutoTitleSettings({
+  cfg
+}: {
+  cfg: ReturnType<typeof useTitleConfig>
+}): React.JSX.Element {
+  const { t } = useI18n()
+  const { providers } = useModels()
+  const { cfg: v, update } = cfg
+  // 判断模型：空 = 跟随当前对话；否则列出已启用的对话模型（与角色偏好模型同一套过滤）。
+  const modelItems = useMemo<SelectEntry<string>[]>(
+    () => [
+      { value: '', label: t('settings.autoTitleModelFollow'), lead: <span className="select-icon"><Sparkles size={14} /></span> },
+      ...providers
+        .filter((p) => (p.purpose ?? 'llm') === 'llm' && p.models.length > 0)
+        .flatMap((p): SelectEntry<string>[] => [
+          { separator: true },
+          { group: p.name, lead: <span className="select-dot" style={{ background: p.accent }} /> },
+          ...p.models.map((m) => ({ value: `${p.id}:${m.id}`, label: m.name }))
+        ])
+    ],
+    [providers, t]
+  )
+  return (
+    <>
+      <h2 className="cf-pane__title">{t('settings.autoTitle')}</h2>
+      <div className="cf-set">
+        <div className="cf-set__row">
+          <div className="cf-set__label">
+            {t('settings.autoTitle')}
+            <span className="cf-set__hint">{t('settings.autoTitleHint')}</span>
+          </div>
+          <Toggle on={v.enabled} onChange={() => update({ enabled: !v.enabled })} />
+        </div>
+        {v.enabled && (
+          <>
+            <div className="cf-set__row">
+              <div className="cf-set__label">{t('settings.autoTitleEvery')}</div>
+              <Segmented
+                value={String(v.every)}
+                onChange={(x) => update({ every: Number(x) })}
+                options={[2, 4, 6, 10].map((n) => ({
+                  v: String(n),
+                  label: t('settings.autoTitleEveryUnit').replace('{n}', String(n))
+                }))}
+              />
+            </div>
+            <div className="cf-set__row">
+              <div className="cf-set__label">{t('settings.autoTitleLang')}</div>
+              <Segmented
+                value={v.lang}
+                onChange={(x) => update({ lang: x as TitleCfgView['lang'] })}
+                options={[
+                  { v: 'auto', label: t('settings.autoTitleLangAuto') },
+                  { v: 'zh', label: t('settings.autoTitleLangZh') },
+                  { v: 'en', label: t('settings.autoTitleLangEn') }
+                ]}
+              />
+            </div>
+            <div className="cf-set__row">
+              <div className="cf-set__label">{t('settings.autoTitleModel')}</div>
+              <Select
+                value={v.model}
+                onChange={(x) => update({ model: x })}
+                items={modelItems}
+                placeholder={t('settings.autoTitleModelFollow')}
+              />
+            </div>
+          </>
         )}
       </div>
     </>

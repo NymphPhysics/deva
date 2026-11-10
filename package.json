@@ -21,7 +21,8 @@
       "electron",
       "electron-winstaller",
       "esbuild",
-      "@parcel/watcher"
+      "@parcel/watcher",
+      "protobufjs"
     ]
   }
 }

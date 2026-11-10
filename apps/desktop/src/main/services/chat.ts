@@ -146,6 +146,7 @@ import {
   listSessions,
   save as saveProject,
   setSessionArchived,
+  TITLE_MAX,
   type ChatSessionMeta,
   type StoredNotice,
   type StoredSession
@@ -196,10 +197,12 @@ import {
   needsCompactionMidTurn,
   NOTIFY_MARKER,
   rememberContextLimit,
+  contextUsage,
   type CompactModelConfig,
   type CompactStatus
 } from './compaction'
 import { clearStaleToolResults } from './tool-results'
+import { markTitleManual, maybeAutoTitle, resetTitleAuto } from './title'
 
 /**
  * 会话编排（Agent 主循环）。
@@ -288,6 +291,28 @@ interface ChatCreateSessionRequest {
   modelRef?: string
 }
 
+/** 开侧栏会话：sideId 是新建的那条，mainId 是它挂在谁旁边。见 chat:create-side。 */
+interface ChatCreateSideRequest {
+  sessionId: string
+  mainId: string
+  /** 用户选中的那段文字（头部引用条 + 派生标题用）。 */
+  selection?: string
+  title?: string
+}
+
+/** 侧栏引用条保留的选中文字上限（只用于展示，长了没意义）。 */
+const SIDE_SELECTION_MAX = 4000
+
+/** 某次工具调用的原始结果（文件预览用）。见 chat:tool-result。 */
+export interface ToolResultView {  name: string
+  /** 调用时给的路径（可能是相对路径，只用于显示与判类型）。 */
+  path: string
+  text: string
+  /** 图片结果，data URI。 */
+  images: string[]
+  isError: boolean
+}
+
 /** 对话输入框切换本对话模型（立即落库，不等下一次发送）。见 chat:set-model。 */
 interface ChatSetModelRequest {
   sessionId: string
@@ -317,9 +342,6 @@ interface ChatSetArchivedRequest {
   sessionId: string
   archived: boolean
 }
-
-/** 用户自定的对话标题上限（列表里单行省略显示，再长也看不全）。 */
-const TITLE_MAX = 100
 
 /** 角色名片草稿：propose_agent 原始参数归一化后的形状（编辑器/名片消费）。 */
 export interface AgentDraft {
@@ -2149,6 +2171,24 @@ const UNATTENDED_EXCLUDED = new Set([
  * 写记忆（memory_write / memory_delete）另按 MEMBER_MEMORY_TOOLS 处理：有文件夹时保留，只能写项目私有记忆。
  */
 const MEMBER_EXCLUDED = new Set(['create_skill', 'propose_agent', 'create_mcp', 'create_task', 'present_files'])
+
+/**
+ * 侧栏会话（/side）不给的工具：
+ * - 结构类：成员增删派发、技能/角色/MCP/定时任务的创建、交付文件——侧栏是「旁边的提问」，不该长出第二个结构；
+ * - 交互类（ask_user / exit_plan）：卡片会冒泡到主对话的待处理队列，而侧栏没有对应的处置入口，会成僵尸卡。
+ * 文件读写与命令**保留**（用户的要求）；回滚与按轮删除在渲染层关闭（那是会静默改磁盘、且没有撤销入口的动作）。
+ */
+const SIDE_EXCLUDED = new Set([
+  ...MEMBER_EXCLUDED,
+  'create_member',
+  'member_send',
+  'member_stop',
+  'member_status',
+  'run_subagent',
+  'send_to_subagent',
+  'ask_user',
+  'exit_plan'
+])
 /** 成员没有文件夹（自己的、跟随的主对话的都没有）时剔除：只剩全局记忆，而全局记忆对成员只读。 */
 const MEMBER_MEMORY_TOOLS = new Set(['memory_write', 'memory_delete'])
 
@@ -2161,6 +2201,23 @@ function sameRoot(a: string | null, b: string | null): boolean {
 /** 对话所属角色的显示名（未绑定或角色已不存在 = 默认角色）。 */
 function personaName(s: StoredSession | undefined): string {
   return getPersona(resolvePersonaId(s?.personaId))?.name ?? 'Deva'
+}
+
+/** 侧栏会话首次发消息时附带的主对话轮数：够看清「在聊什么」，又不至于把侧栏的账单一开局就抬高。 */
+const SIDE_CONTEXT_ROUNDS = 2
+
+/**
+ * 侧栏会话的首条背景块：主对话最近几轮 + 一句边界说明。
+ * 边界必须写清——侧栏是「旁边的提问」，它的结论不会自动回到主对话；要模型明白这一点，
+ * 否则它容易写成「我已经帮你改好了」这种对主对话无效的承诺（实际改动的只是它自己那轮）。
+ */
+function sideContextText(owner: string, context: string): string {
+  return (
+    `⟦deva:side-context⟧\n以下是主对话（${owner}）最近几轮的内容，作为本次提问的背景。\n` +
+    '你正在**侧栏**里回答：这里的问答与主对话相互隔离，你的回复不会写回主对话，除非用户另行要求。\n' +
+    '需要主对话更早或更新的内容时，用 read_main 工具查看。\n\n' +
+    context
+  )
 }
 
 /**
@@ -2458,6 +2515,9 @@ export function registerChatIpc(getWindow: () => BrowserWindow | null): void {
    */
   function notifyPending(turnId: string, sessionId: string, input: PendingInput): void {
     if (remoteTurns.has(turnId)) return
+    // 侧栏会话的工具表里已剔掉 ask_user / exit_plan（见 SIDE_EXCLUDED），正常走不到这里；
+    // 这一句是兜底：万一有别的路径把待处理通知挂到侧栏上，它没有处置入口，弹出来只会是死卡。
+    if (getSession(sessionId)?.sideOf) return
     const target = getSession(sessionId)?.parentId ?? sessionId
     notifyNeedsInput(getWindow, { sessionId: target, title: notifyTitle(sessionId), input })
   }
@@ -3172,13 +3232,18 @@ export function registerChatIpc(getWindow: () => BrowserWindow | null): void {
     return sendToMember(main, member, str('task'), str('message'), tc.id, model, a.report_to_me === true, turnId)
   }
 
-  /** 成员会话的成员工具（read_main：往前翻主对话的正文；report_to_main：本轮结论交给主智能体处理）。 */
+  /**
+   * 成员会话 / 侧栏会话的「读主对话」类工具。
+   * - 成员（parentId）：read_main 往前翻主对话；report_to_main 把本轮结论交给主智能体。
+   * - 侧栏（sideOf）：只有 read_main（它没有「交差」这回事，那条链路在 SIDE_EXCLUDED 里已剔掉）。
+   */
   async function memberSideTool(
     memberId: string,
     tc: { id: string; name: string; args: unknown }
   ): Promise<MemberToolResult> {
     const sub = getSession(memberId)
-    const main = sub?.parentId ? getSession(sub.parentId) : undefined
+    const ownerId = sub?.parentId ?? sub?.sideOf
+    const main = ownerId ? getSession(ownerId) : undefined
     if (!main) return { content: '找不到主对话（可能已被删除）。', summary: '找不到主对话', isError: true }
     const a = (tc.args ?? {}) as { before?: unknown; round?: unknown; offset?: unknown; reason?: unknown }
     const owner = personaName(main)
@@ -4882,6 +4947,8 @@ export function registerChatIpc(getWindow: () => BrowserWindow | null): void {
     // 成员会话（见 members.ts）：身份、职责与文件夹取主对话名单里的那一项。成员可以直接问用户、提交计划（卡片在主对话里
     // 以通知行出现），结论在本轮结束时交回主对话（见 reportMemberTurn）。
     const isMember = !!session.parentId
+    // 侧栏会话（/side）：独立一次性提问，输出绝不回写主对话，也不该弹系统通知、不该长出成员名单。
+    const isSide = !!session.sideOf
     const parentSession = session.parentId ? getSession(session.parentId) : undefined
     const memberRef = parentSession?.members?.find((m) => m.sessionId === sessionId)
     const mainRoot = parentSession?.focusRoot ?? null
@@ -5045,7 +5112,11 @@ export function registerChatIpc(getWindow: () => BrowserWindow | null): void {
           ? handoffOwner
             ? [handoffTool(handoffOwner)]
             : []
-          : mainMemberTools()),
+          : isSide
+            ? // 侧栏只保留「翻主对话」这一个桥：不给成员/创建类工具（它会自己长出另一套结构），
+              // 也不给会往主对话冒泡的交互卡。文件读写照旧（用户明确要的）。
+              [readMainTool()]
+            : mainMemberTools()),
       ...getMcpToolSpecs(rolePersonaId)
     ]
     // tool_search 的可选工具名按筛选后的工具表收窄（成员会话没有 create_* 等）。
@@ -5056,7 +5127,9 @@ export function registerChatIpc(getWindow: () => BrowserWindow | null): void {
           )
         : scheduled
           ? turnTools.filter((t) => !UNATTENDED_EXCLUDED.has(t.name))
-          : turnTools
+          : isSide
+            ? turnTools.filter((t) => !SIDE_EXCLUDED.has(t.name))
+            : turnTools
     )
     // 项目说明在轮开头快照进 system：本轮中途改 AGENTS.md 不改 system（提示缓存前缀稳定），下一轮生效。
     // 成员负责子文件夹时，项目根目录（主对话工作目录）的 AGENTS.md 也一并读入，近者在后。
@@ -5125,7 +5198,7 @@ export function registerChatIpc(getWindow: () => BrowserWindow | null): void {
         allowSubagents: true,
         // 项目成员：主对话的交互轮附成员名单、受理成员工具；成员会话受理 read_main / report_to_main。
         listMembers: !unattended && !isMember ? () => memberListing(sessionId) : undefined,
-        memberTool: isMember
+        memberTool: isMember || isSide
           ? (tc) => memberSideTool(sessionId, tc)
           : !unattended
             ? (tc) => mainMemberTool(sessionId, tc, turnModel, turnId)
@@ -5217,6 +5290,10 @@ export function registerChatIpc(getWindow: () => BrowserWindow | null): void {
       repairDanglingToolUses(session)
       // 本轮对 history 的原地改写落盘（一对话一文件：只重写这一条）；更新时间用于左侧列表排序
       session.updatedAt = Date.now()
+      // 标题自动校正的轮数在这里累加：与下面的 saveProject 共用同一次写入（计数太小，不值得单独落盘）。
+      // 关掉开关时也照常累加——重新打开后节奏才与真实轮数对得上。见 services/title.ts。
+      const titleTurns = (session.titleAuto?.turns ?? 0) + 1
+      session.titleAuto = { ...session.titleAuto, turns: titleTurns }
       saveProject(sessionId)
       busySessions.delete(sessionId)
       busySince.delete(sessionId)
@@ -5246,6 +5323,7 @@ export function registerChatIpc(getWindow: () => BrowserWindow | null): void {
         !fromRemote &&
         !unattended &&
         !isMember &&
+        !isSide &&
         !shuttingDown &&
         !continues &&
         !awaitsFollowUp
@@ -5268,6 +5346,10 @@ export function registerChatIpc(getWindow: () => BrowserWindow | null): void {
         if (abortCauses.get(turnId) !== 'deleted') reportMemberTurn(session, endReason, replyText, replyError, turnModel)
         else memberToMain.delete(sessionId)
       }
+      // 标题自动校正：一轮真正结束、本轮回写落盘之后才判（不占本轮时间、不影响回复，失败只进日志）。
+      // 定时任务对话与成员会话的标题各有来源（任务标题 / 成员名单），由 maybeAutoTitle 内部跳过。
+      // 轮数已在上面落盘前累加，这里只做「判一次、可能改一次」。
+      if (!shuttingDown) void maybeAutoTitle(session, { endReason, continues: continued, scheduled })
     }
     const abortCause = abortCauses.get(turnId)
     abortCauses.delete(turnId)
@@ -5418,12 +5500,13 @@ export function registerChatIpc(getWindow: () => BrowserWindow | null): void {
     let slashUsages: ReturnType<typeof skillToolUsages> = null
     const slashMatch = /^\/([A-Za-z0-9_-]+)[ \t]*([\s\S]*)$/.exec(text.trim())
     if (slashMatch) {
-      // 成员会话没有创建类工具：/create-agent 等不展开（同技能清单，见 runAgentLoop 的 hasTool）。
-      const loaded = loadSkillInstructionsByName(
-        slashMatch[1],
-        resolvePersonaId(session.personaId),
-        session.parentId ? (n) => !MEMBER_EXCLUDED.has(n) : undefined
-      )
+      // 成员与侧栏会话都没有创建类工具：/create-agent 等不展开（同技能清单，见 runAgentLoop 的 hasTool）。
+      const blocked = session.parentId
+        ? (n: string) => !MEMBER_EXCLUDED.has(n)
+        : session.sideOf
+          ? (n: string) => !SIDE_EXCLUDED.has(n)
+          : undefined
+      const loaded = loadSkillInstructionsByName(slashMatch[1], resolvePersonaId(session.personaId), blocked)
       if (loaded) {
         const rest = slashMatch[2].trim()
         effectiveText =
@@ -5431,7 +5514,9 @@ export function registerChatIpc(getWindow: () => BrowserWindow | null): void {
           `===== 技能指令：${loaded.name} =====\n${skillDirNote(loaded.dir)}${loaded.instructions}\n===== 指令结束 =====` +
           (rest ? `\n\n用户补充：${rest}` : '')
         // 成员会话不提供创建类工具，那几个的用法不附。
-        const usable = loaded.allowedTools.filter((n) => !session.parentId || !MEMBER_EXCLUDED.has(n))
+        const usable = loaded.allowedTools.filter((n) =>
+          session.parentId ? !MEMBER_EXCLUDED.has(n) : session.sideOf ? !SIDE_EXCLUDED.has(n) : true
+        )
         slashUsages = skillToolUsages(usable, unknownUsages(history, new Set(usable)))
       }
     }
@@ -5456,6 +5541,19 @@ export function registerChatIpc(getWindow: () => BrowserWindow | null): void {
       parts.unshift({ type: 'text', text: session.restoreNote })
       session.restoreNote = undefined
     }
+    // 侧栏会话的首条消息：把主对话最近几轮作为背景快照，塞在正文之前的独立 text 块里（气泡里看不到）。
+    // 只注入一次（sideContextSent），之后侧栏独立演进——这样「隔离」是结构上的：侧栏读写全落在自己的
+    // 会话文件，主对话一个字节都不动；也不必为此每轮重发一遍主对话历史（那是纯烧 token）。
+    // 想追主对话的最新进展时用 read_main 工具翻（复用成员会话那套，见 readMainTool）。
+    if (session.sideOf && !session.sideContextSent) {
+      const main = getSession(session.sideOf)
+      if (main) {
+        const owner = personaName(main)
+        const ctx = recentMainContext(main.messages, owner, SIDE_CONTEXT_ROUNDS)
+        if (ctx) parts.unshift({ type: 'text', text: sideContextText(owner, ctx) })
+      }
+      session.sideContextSent = true
+    }
     // 待办清单的两类提醒，同样作为问题正文之前的独立 text 块（气泡里看不到）：用户在面板里手动取消过清单
     // → 告知模型别再写回它（用一次即清）；上一轮留下未完成的清单（多为任务被暂停）→ 提醒模型继续就更新、
     // 不再进行就传 cancel 取消。
@@ -5469,14 +5567,19 @@ export function registerChatIpc(getWindow: () => BrowserWindow | null): void {
     const bgNote = takeNotices(sessionId)
     if (bgNote) parts.push({ type: 'text', text: bgNote })
     // 用户 @ 了角色或成员（主对话的交互轮）：还不是成员的角色加入名单，并请主智能体把这条消息交给它们。
-    const mentionNote = !session.parentId && trigger !== 'schedule' ? handleMentions(session, text) : null
+    // 用户 @ 了角色或成员（主对话的交互轮）：还不是成员的角色加入名单，并请主智能体把这条消息交给它们。
+    // 侧栏会话不给这个入口：它不该长出成员名单（那是主对话的结构），@ 到了也只会写进侧栏自己的边车。
+    const mentionNote =
+      !session.parentId && !session.sideOf && trigger !== 'schedule' ? handleMentions(session, text) : null
     if (mentionNote) parts.push(mentionNote)
     if (slashUsages) parts.push({ type: 'text', text: slashUsages.text, listing: slashUsages.listing })
     // 用户直接在成员会话里交代事情：名单上记下它在做什么（成员卡片显示任务标题）。派来的上一项任务还没做完的，
     // 这一轮算接着做它（任务标题不变，完成后交回主对话，见 resumeMemberTask）。
     if (session.parentId && !resumeMemberTask(session, model)) noteMemberDirectTask(session, text)
     if (parts.length) {
-      parts.push({ type: 'text', text: questionText })
+      // 侧栏会话的上下文块会让 parts 非空，但正文可能确实为空（只发了附件）：那时候补的
+      // 「请理解并处理上述附件」才是正文，不能 push 一个空 text 块（模型会收到一段空内容）。
+      if (questionText) parts.push({ type: 'text', text: questionText })
       history.push({ role: 'user', content: parts })
     } else {
       history.push({ role: 'user', content: questionText })
@@ -5568,6 +5671,33 @@ export function registerChatIpc(getWindow: () => BrowserWindow | null): void {
     }
   )
 
+  // 开一条侧栏会话（/side 侧边提问）：独立文件 + sideOf 指向主对话。
+  // 身份 / 工作区 / 模型快照自主对话——侧栏问的是同一个项目里的同一件事，不该另有一套绑定；
+  // 标题若没给就用选中内容派生，够在头部标出来是「关于哪段」的提问。
+  ipcMain.handle('chat:create-side', (_e, payload: ChatCreateSideRequest): { ok: true } => {
+    const main = getSession(payload.mainId)
+    if (!main) return { ok: true }
+    ensureSession(payload.sessionId, {
+      personaId: main.personaId,
+      focusRoot: main.focusRoot ?? null,
+      model: main.model
+    })
+    const s = getSession(payload.sessionId)
+    if (s) {
+      s.sideOf = main.id
+      // 选中内容只留一份：作为侧栏头部的引用条展示用，正文由用户自己发（那是用户说的话，该出现在气泡里）。
+      const sel = (payload.selection ?? '').trim().slice(0, SIDE_SELECTION_MAX)
+      if (sel) {
+        s.sideSelection = sel
+        s.title = deriveTitle(sel)
+      } else {
+        s.title = deriveTitle(payload.title ?? '') || main.title
+      }
+      saveProject(s.id)
+    }
+    return { ok: true }
+  })
+
   // 对话输入框切换模型：立即落库到本对话（此前只写渲染层覆盖层、随下一次发送才落库，切了没发重启即丢）。
   // 尚未建档的惰性会话查不到 → 不建档，模型仍由覆盖层随首发落库。不改 updatedAt（换模型不算新活动）。
   // ok = 对话已建档、已落库（渲染层据此撤掉本地覆盖层，此后以主进程为准）；惰性未建档的返回 false。
@@ -5626,6 +5756,8 @@ export function registerChatIpc(getWindow: () => BrowserWindow | null): void {
           title = deriveTitle(first.text) || deriveTitle(first.attachments.map((a) => a.name).join(' '))
       }
       session.title = title
+      // 手改为用户意图的最终表达：此后本会话退出自动校正（清空标题 = 恢复自动标题 = 交还给自动）。
+      markTitleManual(session, Boolean(String(payload.title ?? '').trim()))
       saveProject(payload.sessionId)
       return { title }
     }
@@ -5654,7 +5786,14 @@ export function registerChatIpc(getWindow: () => BrowserWindow | null): void {
       for (const m of list) {
         if (typeof m.focusRoot === 'string' && m.focusRoot.trim()) trustRoot(m.focusRoot)
       }
-      return list
+      // 顺带给每条附一份上下文占用快照（输入框上方的用量 chip）。只在出口算、不写进 _index.json：
+      // 它是会过期的数字，落进索引就会一重启就显示上一轮的旧读数（同 titleAuto 不进 metaOf 的道理）。
+      // 模型已删 / 没配好时不算，渲染层据此隐藏 chip。
+      return list.map((m) => {
+        const model = resolveModelRefOrNull(m.model ?? '') ?? resolveDefaultModel()
+        const s = model ? getSession(m.id) : null
+        return model && s ? { ...m, context: contextUsage(s, model) } : m
+      })
     }
   )
 
@@ -5708,6 +5847,44 @@ export function registerChatIpc(getWindow: () => BrowserWindow | null): void {
       } catch {
         return null
       }
+    }
+  )
+
+  // 某次 read_file 调用的原始结果（文件预览用）。
+  // 只从**历史**里取，且硬校验那次调用确实是 read_file——渲染层给不出任意路径，因此不构成新的读盘口子。
+  // 为什么不走 fs:* 那套：那些受受信根约束（workspace.ts 的 assertInside），而 Agent 的 read_file 明确不受限，
+  // 走 fs 会出现「刚读过的文件反而预览不了」。同 deliverables.ts 的做法。
+  ipcMain.handle(
+    'chat:tool-result',
+    (_e, sessionId: unknown, toolUseId: unknown): ToolResultView | null => {
+      if (typeof sessionId !== 'string' || typeof toolUseId !== 'string') return null
+      const s = getSession(sessionId)
+      if (!s) return null
+      for (const m of s.messages) {
+        if (typeof m.content === 'string') continue
+        for (const p of m.content) {
+          if (p.type !== 'tool_use' || p.id !== toolUseId) continue
+          if (p.name !== 'read_file') return null
+          const path = (p.input as { path?: unknown } | null)?.path
+          const res = s.messages.find(
+            (x) =>
+              typeof x.content !== 'string' &&
+              x.content.some((q) => q.type === 'tool_result' && q.toolUseId === toolUseId)
+          )
+          const hit =
+            typeof res?.content === 'string'
+              ? undefined
+              : res?.content.find((q): q is Extract<ContentPart, { type: 'tool_result' }> => q.type === 'tool_result' && q.toolUseId === toolUseId)
+          return {
+            name: 'read_file',
+            path: typeof path === 'string' ? path : '',
+            text: hit?.content ?? '',
+            images: (hit?.images ?? []).map((im) => `data:${im.mediaType};base64,${im.data}`),
+            isError: hit?.isError === true
+          }
+        }
+      }
+      return null
     }
   )
 
@@ -5818,14 +5995,17 @@ export function registerChatIpc(getWindow: () => BrowserWindow | null): void {
   // 删绑定任务时连任务对话一起删（tasks.ts deleteTask）：正在跑的一轮由 purgeSession 中止。
   setTaskSessionPurger(purgeSession)
 
-  // 删除某会话（含会话级授权）。id 全局唯一 → 按 id 删。主对话连同它的成员会话、绑定的定时任务及其任务对话一并删除。
+  // 删除某会话（含会话级授权）。id 全局唯一 → 按 id 删。主对话连同它的成员会话、侧栏会话、绑定的定时任务及其任务对话一并删除。
   ipcMain.handle(
     'chat:delete-session',
     (_e, sessionId: string, _workspaceRoot: string | null): { ok: true } => {
       const members = getSession(sessionId)?.members ?? []
       const owned = tasksOwnedBy(sessionId)
+      // 侧栏会话（sideOf 指向本对话的那些）：不清理就会在磁盘上留下永远进不去的孤儿文件。
+      const sides = listSessions().filter((m) => m.sideOf === sessionId)
       purgeSession(sessionId)
       for (const m of members) purgeSession(m.sessionId)
+      for (const s of sides) purgeSession(s.id)
       // 任务记录与任务对话一起删（deleteTask 经 setTaskSessionPurger 中止正在跑的一轮并删对话）。
       for (const t of owned) deleteTask(t.id)
       return { ok: true }
@@ -5908,6 +6088,8 @@ export function registerChatIpc(getWindow: () => BrowserWindow | null): void {
         s.lastKnown = {}
         s.baselines = {}
         s.restoreNote = undefined
+        // 标题自动校正的计数与校正记录随正文一并作废（历史已空，轮计数与「已校正过」都失去意义）。
+        resetTitleAuto(s)
         s.updatedAt = Date.now()
         saveProject(sessionId)
       }

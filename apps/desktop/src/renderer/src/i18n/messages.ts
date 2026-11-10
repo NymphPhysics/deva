@@ -662,7 +662,18 @@ const zhCN: MessageTree = {
       memberSkipped: '不限',
       memberDone: '负责的文件夹：'
     },
-    md: { copy: '复制', copied: '已复制' }
+    md: { copy: '复制', copied: '已复制' },
+    // 文件预览（read_file 结果的覆盖层面板，见 features/chat/FilePreview.tsx）
+    preview: {
+      title: '文件预览',
+      open: '预览文件',
+      loading: '正在读取…',
+      missing: '取不到这次读取的内容（可能已被清理或该轮已被删除）。',
+      empty: '这个文件没有可显示的文本内容。',
+      unknown: '未知类型',
+      openImage: '点击查看大图',
+      imageCount: '共 {n} 张'
+    },
   },
   bots: {
     title: '机器人',
@@ -764,6 +775,17 @@ const zhCN: MessageTree = {
     chatFontLg: '大',
     chatFontXl: '特大',
     closeToTray: '关闭窗口时驻留托盘',
+    // 对话标题自动校正（见 main/services/title.ts）
+    autoTitle: '自动校正对话标题',
+    autoTitleHint: '首轮结束后由模型复核标题，明显不准才改',
+    autoTitleEvery: '检查间隔',
+    autoTitleEveryUnit: '每 {n} 轮',
+    autoTitleLang: '标题语言',
+    autoTitleLangAuto: '跟随界面',
+    autoTitleLangZh: '中文',
+    autoTitleLangEn: 'English',
+    autoTitleModel: '判断用的模型',
+    autoTitleModelFollow: '跟随当前对话',
     models: '模型',
     about: '关于',
     version: '版本',
@@ -995,6 +1017,29 @@ const zhCN: MessageTree = {
       title: '对话导航',
       untitled: '（附件）'
     },
+    // 侧栏（/side 侧边提问）
+    side: {
+      title: '侧边提问',
+      close: '关闭侧栏',
+      empty: '在这里问点什么。它能看到主对话最近几轮，回答不会写回主对话。',
+      placeholder: '就这件事提问…（Enter 发送，Shift+Enter 换行）',
+      send: '发送',
+      stop: '停止',
+      working: '正在回答…',
+      about: '关于',
+      isolated: '侧栏与主对话相互隔离，这里的回答不会写回主对话。',
+      askSelection: '就此提问'
+    },
+    // 上下文用量 chip（输入框工具条，见 ChatFirstShell 的 ContextMeter）
+    ctx: {
+      title: '上下文 {used} / 压缩线 {trigger}（窗口 {window}，距压缩还有 {left}）',
+      titleLabel: '上下文用量',
+      used: '已用',
+      trigger: '压缩线',
+      window: '窗口',
+      left: '距压缩',
+      hint: '接近压缩线时，较早的对话会自动折叠成摘要。~ 表示按字符估算（刚压缩或回滚过）。'
+    },
     brandTag: '对话优先',
     newChat: '新建对话',
     draftTag: '[草稿]',
@@ -1046,6 +1091,7 @@ const zhCN: MessageTree = {
       title: '指令',
       compact: '压缩当前对话上下文，较早内容折叠为摘要',
       rewind: '回到之前的检查点，撤回代码和 / 或对话',
+      side: '就选中的内容在侧边提问，不打断主对话',
       hint: '↑↓ 选择 · Enter 采用 · Esc 关闭',
       mentionTitle: '请成员协助'
     },
@@ -1247,10 +1293,10 @@ const zhCN: MessageTree = {
     send: '发送',
     // 回合进行中插入当前轮：发送键提示、占位提示与待送达胶囊
     insert: {
-      hint: '插入当前轮（Enter）：当前步骤结束后交给 {name}，来不及就在本轮结束后发出',
-      placeholder: '补充或纠正，当前步骤结束后交给 {name}…',
+      hint: '插入当前轮（Enter）：等当前步骤跑完就交给 {name}（正在跑长命令时要等它结束）',
+      placeholder: '补充或纠正：等当前步骤跑完后交给 {name}…',
       pending: '待插入',
-      pendingHint: '当前步骤结束后送达',
+      pendingHint: '等当前步骤跑完送达（长命令需等它结束）',
       count: '{n} 条',
       withdraw: '撤回'
     },
@@ -2075,7 +2121,17 @@ const en: MessageTree = {
       memberSkipped: 'Any',
       memberDone: 'Folder: '
     },
-    md: { copy: 'Copy', copied: 'Copied' }
+    md: { copy: 'Copy', copied: 'Copied' },
+    preview: {
+      title: 'File preview',
+      open: 'Preview file',
+      loading: 'Reading…',
+      missing: 'Could not load this read result (it may have been cleaned up or the turn deleted).',
+      empty: 'This file has no displayable text content.',
+      unknown: 'Unknown type',
+      openImage: 'Click to view full size',
+      imageCount: '{n} images'
+    },
   },
   bots: {
     title: 'Bots',
@@ -2180,6 +2236,17 @@ const en: MessageTree = {
     chatFontLg: 'Large',
     chatFontXl: 'Extra large',
     closeToTray: 'Keep in tray when window closes',
+    // 对话标题自动校正（见 main/services/title.ts）
+    autoTitle: 'Auto-correct conversation titles',
+    autoTitleHint: 'A model reviews the title after the first turn and only renames it when clearly off',
+    autoTitleEvery: 'Check interval',
+    autoTitleEveryUnit: 'every {n} turns',
+    autoTitleLang: 'Title language',
+    autoTitleLangAuto: 'Follow UI',
+    autoTitleLangZh: 'Chinese',
+    autoTitleLangEn: 'English',
+    autoTitleModel: 'Judging model',
+    autoTitleModelFollow: 'Follow the conversation',
     models: 'Models',
     about: 'About',
     version: 'Version',
@@ -2418,6 +2485,27 @@ const en: MessageTree = {
       title: 'Conversation index',
       untitled: '(attachment)'
     },
+    side: {
+      title: 'Side chat',
+      close: 'Close side chat',
+      empty: 'Ask something here. It can see the last few turns of the main conversation; its answers never go back there.',
+      placeholder: 'Ask about this… (Enter to send, Shift+Enter for a new line)',
+      send: 'Send',
+      stop: 'Stop',
+      working: 'Answering…',
+      about: 'About',
+      isolated: 'The side chat is isolated from the main conversation — answers here never go back.',
+      askSelection: 'Ask about this'
+    },
+    ctx: {
+      title: 'Context {used} / compact at {trigger} ({left} left, window {window})',
+      titleLabel: 'Context usage',
+      used: 'Used',
+      trigger: 'Compacts at',
+      window: 'Window',
+      left: 'Left',
+      hint: 'Earlier turns are folded into a summary as you approach the compact line. ~ marks a character-based estimate (just compacted or rewound).'
+    },
     brandTag: 'Chat-first',
     newChat: 'New chat',
     draftTag: '[Draft]',
@@ -2468,6 +2556,7 @@ const en: MessageTree = {
       title: 'Commands',
       compact: 'Compact this conversation — fold earlier turns into a summary',
       rewind: 'Go back to an earlier checkpoint — undo code and/or conversation',
+      side: 'Ask about the selection on the side, without interrupting this conversation',
       hint: '↑↓ navigate · Enter accept · Esc dismiss',
       mentionTitle: 'Bring in a member'
     },
@@ -2661,10 +2750,10 @@ const en: MessageTree = {
     attach: 'Attach file',
     send: 'Send',
     insert: {
-      hint: "Insert into the current turn (Enter): {name} gets it after the current step, or right after this turn if it's already wrapping up",
-      placeholder: 'Add a note or correction — {name} gets it after the current step…',
+      hint: 'Insert into the current turn (Enter): {name} gets it once the current step finishes (a long-running command has to finish first)',
+      placeholder: 'Add a note or correction — {name} sees it after the current step…',
       pending: 'Queued',
-      pendingHint: 'Delivered after the current step',
+      pendingHint: 'Delivered when the current step finishes (long commands wait for completion)',
       count: '{n} messages',
       withdraw: 'Withdraw'
     },

@@ -281,6 +281,20 @@ export interface SessionMeta {
   members?: MemberMeta[]
   /** 成员会话所属的主对话 id（只出现在 store 内部的全部会话里，对外的 sessions 不含成员会话）。 */
   parentId?: string
+  /** 侧栏会话所属的主对话 id（同样只在内部全部会话里，不进左侧列表）。 */
+  sideOf?: string
+  /** 侧栏是从哪段文字发起提问的（头部引用条用）。 */
+  sideSelection?: string
+  /** 上下文占用快照（主进程在 chat:list-sessions 出口临时附加，不落盘）。 */
+  context?: ContextUsageView
+}
+
+/** 上下文占用快照（与 preload 的 ChatSessionMeta.context 对齐）。 */
+export interface ContextUsageView {
+  used: number
+  trigger: number
+  window: number
+  exact: boolean
 }
 
 /** send 接受的附件（路径给主进程读取，名称/类型用于本地乐观气泡）。 */
@@ -501,6 +515,22 @@ interface ChatContextValue {
   currentSessionId: string
   messages: ChatMessage[]
   streaming: boolean
+  /** 当前对话的上下文占用（输入框上方的用量 chip）；null = 没配好模型，界面不显示。 */
+  contextUsage: ContextUsageView | null
+  /** 侧栏（/side 侧边提问）：独立会话，输出不写回主对话。 */
+  side: {
+    /** 当前打开的侧栏会话 id（null = 没开）。 */
+    id: string | null
+    /** 发起这次提问时用户选中的那段文字。 */
+    selection?: string
+    messages: ChatMessage[]
+    streaming: boolean
+    /** 打开侧栏；带 selection 即新建一条以该段文字为主题的提问。 */
+    open: (selection?: string) => Promise<void>
+    close: () => void
+    send: (text: string) => Promise<boolean>
+    stop: () => void
+  }
   /** 流式实时状态（底部工作指示器用；非 streaming 时为归零值）。 */
   streamStatus: StreamStatus
   /** 各会话的活动态（键=sessionId）：左侧列表据此显示「生成中 / 待处理」角标。 */
@@ -1142,7 +1172,7 @@ export function ChatProvider({ children }: { children: ReactNode }): React.JSX.E
   // 主进程交来的全部会话，含成员会话（带 parentId，见 SessionMeta.parentId）。成员会话不进左侧列表，
   // 对外只给 sessions（不含成员会话）；打开成员对话时它的模型 / 思考等级 / 文件夹从这里读。
   const [allSessions, setSessions] = useState<SessionMeta[]>([])
-  const sessions = useMemo(() => allSessions.filter((s) => !s.parentId), [allSessions])
+  const sessions = useMemo(() => allSessions.filter((s) => !s.parentId && !s.sideOf), [allSessions])
   // 初始会话清单是否已载入完成。首次 listSessions resolve 后置 true 并恒保持；
   // 渲染层据此区分「加载中」与「确认无对话」，避免启动瞬间闪现空态。
   const [currentSessionId, setCurrentSessionId] = useState<string>('')
@@ -1241,13 +1271,24 @@ export function ChatProvider({ children }: { children: ReactNode }): React.JSX.E
     []
   )
 
+  // 侧栏（/side）当前打开的会话 id：侧栏不切换 currentSessionId，故 attachSession 需要单独认它。
+  // 声明在 attachSession 之前（后者在回调里读它，提前声明可避开暂时性死区）。
+  const [sideId, setSideId] = useState<string | null>(null)
+  const sideRef = useRef(sideId)
+  sideRef.current = sideId
+
   // 从主进程载入会话并建活动态；若该会话正有一轮在跑（手机端 / 定时任务发起，或本层切走前发起），就地接上：
   // 置流式、记 turnId，此后的流事件照本地回合拼进末条助手气泡，发送键随之变为停止。
   // 载入期间已切走 / 已有活动态生成 → 丢弃结果（绝不冲掉实时内容）。
   const attachSession = useCallback(
     async (sid: string): Promise<void> => {
       const { messages, turnId, startedAt } = await window.deva.chat.attachSession(sid)
-      if (sessionIdRef.current !== sid || runtimesRef.current.has(sid)) return
+      // 载入期间已切走 → 丢弃结果（绝不冲掉实时内容）。
+      // 例外：侧栏会话与 currentSessionId 本就不是同一条（侧栏不切换主对话），故没打开时也不丢——
+      // 那条历史只归侧栏自己用，不存在「冲到主对话」的可能。
+      const isSideSession = sideRef.current === sid
+      if (!isSideSession && sessionIdRef.current !== sid) return
+      if (runtimesRef.current.has(sid)) return
       const msgs = displayToMessages(messages as DisplayMessage[])
       if (!turnId) {
         patchRuntime(sid, (r) => ({ ...r, messages: msgs }))
@@ -1290,6 +1331,26 @@ export function ChatProvider({ children }: { children: ReactNode }): React.JSX.E
       const map = new Map(prev)
       if (pending.length) map.set(sid, pending)
       else map.delete(sid)
+      return map
+    })
+  }, [])
+
+  // 回合进行中的实时输入量（键=sessionId）：由主进程每步推送的 usage 事件更新，只为让用量 chip 涨起来。
+  // 权威值来自 chat:list-sessions 的 context（本轮结束落盘后才有）；done 时清掉这里的覆盖。
+  const [liveUsage, setLiveUsageMap] = useState<Map<string, number>>(() => new Map())
+  const setLiveUsage = useCallback((sid: string, used: number): void => {
+    setLiveUsageMap((prev) => {
+      if (prev.get(sid) === used) return prev
+      const map = new Map(prev)
+      map.set(sid, used)
+      return map
+    })
+  }, [])
+  const clearLiveUsage = useCallback((sid: string): void => {
+    setLiveUsageMap((prev) => {
+      if (!prev.has(sid)) return prev
+      const map = new Map(prev)
+      map.delete(sid)
       return map
     })
   }, [])
@@ -1403,7 +1464,7 @@ export function ChatProvider({ children }: { children: ReactNode }): React.JSX.E
   const openFirstSession = useCallback(
     (list: SessionMeta[]): void => {
       const first = list
-        .filter((s) => !s.archived && !s.parentId)
+        .filter((s) => !s.archived && !s.parentId && !s.sideOf)
         .reduce<SessionMeta | null>((a, s) => (a && a.updatedAt >= s.updatedAt ? a : s), null)
       if (!first) {
         startFresh()
@@ -1583,6 +1644,8 @@ export function ChatProvider({ children }: { children: ReactNode }): React.JSX.E
       if (ev.type === 'done') {
         const compacted = compactedSids.delete(sid)
         const compactDrop = compactDropSids.delete(sid)
+        // 本轮结束：丢掉轮中的实时读数，让位给主进程在 chat:list-sessions 给回的权威 context。
+        clearLiveUsage(sid)
         bgStartedRef.current.delete(sid)
         setBgStreaming((prev) => {
           if (!prev.has(sid)) return prev
@@ -1667,7 +1730,12 @@ export function ChatProvider({ children }: { children: ReactNode }): React.JSX.E
         patchMessages(sid, dropStepPartial)
         return
       }
-      if (ev.type === 'usage') return
+      if (ev.type === 'usage') {
+        // 轮中实时用量：主进程每步都推真实 usage，权威值要等本轮结束落盘才有（chat:list-sessions 的 context），
+        // 这里只为「看着数字涨」。done 时清掉，让位给权威读数。
+        if (typeof ev.input === 'number' && ev.input > 0) setLiveUsage(sid, ev.input)
+        return
+      }
       // 交互卡在手机端被答复：卡可能不在末条助手消息里，按 key 全量查找收敛。
       if (ev.type === 'interaction_resolved') {
         patchCardBlocks(sid, (blocks) => resolveCard(blocks, ev))
@@ -1722,8 +1790,7 @@ export function ChatProvider({ children }: { children: ReactNode }): React.JSX.E
 
   // 对外暴露「当前所视会话」的那一份活动态（messages/streaming/streamStatus）。
   const messages = viewed?.messages ?? EMPTY_MESSAGES
-  const streaming = viewedStreaming
-  // streamStatus 在渲染作用域即时算（每次渲染读新的 Date.now()）：流式期间 setTick 每秒触发渲染 → 秒数走动。
+  const streaming = viewedStreaming  // streamStatus 在渲染作用域即时算（每次渲染读新的 Date.now()）：流式期间 setTick 每秒触发渲染 → 秒数走动。
   const streamStatus: StreamStatus =
     viewed && viewed.streaming
       ? {
@@ -1733,8 +1800,26 @@ export function ChatProvider({ children }: { children: ReactNode }): React.JSX.E
         }
       : IDLE_STATUS
 
-  // 各会话活动态摘要（左侧列表角标用）；仅 runtimes / 未读集 / 后台进行中集变化时重算。
-  // 后台回合没缓存 runtime（进行中靠 bgStreaming，完成后 runtime 也会被丢弃），这类会话单独补一条。
+  // ── 侧栏（/side 侧边提问）───────────────────────────────────────────────
+  // 关键：侧栏**不切换 currentSessionId**。主对话区继续显示主对话，侧栏只读自己那条会话的 runtime
+  // —— 流事件本来就按 sessionId 分键，所以两份内容各归各家、互不干扰。（sideId 与 sideRef 在
+  // attachSession 之前已声明，那里要用它判断「这条历史是侧栏的，不该因切走而被丢弃」。）
+  const sideRuntime = sideId ? runtimes.get(sideId) : undefined
+  const sideMessages = sideRuntime?.messages ?? EMPTY_MESSAGES
+  const sideStreaming = sideRuntime?.streaming ?? false
+
+  // 主对话与侧栏的联动：切到别的对话就关掉侧栏（避免「挂左边的对话、看右边的答案」错位）。
+  useEffect(() => {
+    setSideId((cur) => {
+      if (!cur) return cur
+      const meta = allSessions.find((s) => s.id === cur)
+      return meta && meta.sideOf === currentSessionId ? cur : null
+    })
+  }, [currentSessionId, allSessions])
+
+  // 侧栏的操作对象在 value 的 useMemo 里组装（要用那里面的 sendTo）。
+
+  // 各会话活动态摘要（左侧列表角标用）；仅 runtimes / 未读集 / 后台进行中集变化时重算。  // 后台回合没缓存 runtime（进行中靠 bgStreaming，完成后 runtime 也会被丢弃），这类会话单独补一条。
   const sessionStates = useMemo<Record<string, SessionLiveState>>(() => {
     const out: Record<string, SessionLiveState> = {}
     for (const [id, r] of runtimes) {
@@ -1763,6 +1848,19 @@ export function ChatProvider({ children }: { children: ReactNode }): React.JSX.E
 
   /** 该会话是不是成员会话（见 SessionMeta.parentId）。 */
   const isMemberSession = (id: string): boolean => allSessions.some((s) => s.id === id && !!s.parentId)
+
+  /**
+   * 当前对话的上下文占用。轮中（liveUsage 有值）用主进程每步推的真实 usage，
+   * 轮末/静止时用 chat:list-sessions 附带的权威快照；两者都没有（模型没配好）则 null，界面隐藏 chip。
+   */
+  const contextUsage = useMemo<ContextUsageView | null>(() => {
+    const sid = currentSessionId
+    if (!sid) return null
+    const base = allSessions.find((s) => s.id === sid)?.context
+    const live = liveUsage.get(sid)
+    if (live !== undefined) return base ? { ...base, used: live, exact: true } : null
+    return base ?? null
+  }, [allSessions, liveUsage, currentSessionId])
 
   // 当前对话的绑定读出（覆盖层优先于已落库 SessionMeta）：驱动对话优先外壳的头像 / 工作区 chip。
   // 覆盖层承载「尚未落库」（新会话首发前）或「刚 mount/unmount」的值；落库真值来自 listSessions。
@@ -1848,8 +1946,8 @@ export function ChatProvider({ children }: { children: ReactNode }): React.JSX.E
   const value = useMemo<ChatContextValue>(() => {
     // 返回是否真的发出：false = 未发出（空输入 / 本会话正忙 / 未选模型 / IPC 失败），调用方据此把草稿放回。
     // 未发出的原因一律走 toast、不进对话流——这些提示主进程不落盘，做成气泡重启即消失，前后不一致。
-    const send = async (text: string, attachments?: SendAttachment[]): Promise<boolean> => {
-      const sid = sessionIdRef.current
+    const sendTo = async (targetSid: string, text: string, attachments?: SendAttachment[]): Promise<boolean> => {
+      const sid = targetSid
       const body = text.trim()
       const atts = attachments ?? []
       // 只挡「本会话」正在进行的回合——别的会话流式与否，都不影响此处发送（多对话并行的关键）。
@@ -1997,6 +2095,72 @@ export function ChatProvider({ children }: { children: ReactNode }): React.JSX.E
       if (turnId) void window.deva.chat.abort(turnId)
     }
 
+    // 侧栏也走同一条发送链路，只是目标会话不同（见 side 那一组）。
+    const send = (text: string, attachments?: SendAttachment[]): Promise<boolean> =>
+      sendTo(sessionIdRef.current, text, attachments)
+
+    /**
+     * 侧栏（/side 侧边提问）：独立会话，输出不写回主对话。
+     * open 不带 selection 时复用本对话已有的那条侧栏（有就接着聊，没有才新建）；
+     * 带 selection 则新建一条以那段文字为主题的提问——用户的意思很明确：这是另一件事。
+     */
+    const side: ChatContextValue['side'] = {
+      id: sideId,
+      selection: sideId ? allSessions.find((s) => s.id === sideId)?.sideSelection : undefined,
+      messages: sideMessages,
+      streaming: sideStreaming,
+      open: async (selection?: string): Promise<void> => {
+        const mainId = sessionIdRef.current
+        if (!mainId) return
+        // 一律向主进程要一份最新的会话清单，而不是读闭包里的 allSessions：
+        // 侧栏打开过一次之后、切了对话再回来，渲染层这份清单可能还没同步到那条侧栏会话，
+        // 于是「existing 找不到 → 又去新建」，表现为「来回切换之后侧栏就打不开了」。
+        const list = await window.deva.chat.listSessions(projectPathRef.current).catch(() => null)
+        if (list) setSessions(list)
+        const existing = (list ?? allSessions).find((s) => s.sideOf === mainId && !s.archived)
+        if (existing && !selection) {
+          sideRef.current = existing.id
+          setSideId(existing.id)
+          // 载入它的历史（已有 runtime 就不重载，避免冲掉正在流的内容）；**不动 currentSessionId**。
+          void attachSession(existing.id)
+          return
+        }
+        const newId = genId()
+        try {
+          await window.deva.chat.createSide({ sessionId: newId, mainId, selection })
+        } catch (e) {
+          // 侧栏建不出来就明说，别让用户以为「点了没反应」。
+          toast.show({
+            variant: 'error',
+            title: t('chat.error'),
+            message: (e as Error)?.message ?? String(e),
+            duration: 8000
+          })
+          return
+        }
+        await refreshSessions()
+        // 先同步 ref 再挂载：attachSession 里要按 sideRef 判断「这条历史是侧栏的」，
+        // 若等 React 提交完 setState 才更新 ref，那次载入会被当成「已切走」直接丢弃。
+        sideRef.current = newId
+        setSideId(newId)
+        await attachSession(newId)
+      },
+      close: (): void => {
+        sideRef.current = null
+        setSideId(null)
+      },
+      send: async (text: string): Promise<boolean> => {
+        const id = sideRef.current
+        if (!id) return false
+        return sendTo(id, text)
+      },
+      stop: (): void => {
+        const id = sideRef.current
+        const turnId = id ? runtimesRef.current.get(id)?.turnId : null
+        if (turnId) void window.deva.chat.abort(turnId)
+      }
+    }
+
     // 回合进行中插入（见 ChatContextValue.insert）。模型只在来不及送达、改作下一轮发出时用作回落，解析同 send。
     const insert = async (text: string): Promise<boolean> => {
       const sid = sessionIdRef.current
@@ -2024,7 +2188,7 @@ export function ChatProvider({ children }: { children: ReactNode }): React.JSX.E
         })
         if (r.ok) return true
         // 回合恰好已经结束：照常发出，开始新的一轮。
-        if (r.reason === 'idle') return send(body)
+        if (r.reason === 'idle') return sendTo(sid, body)
         if (r.reason === 'busy') toast.show({ variant: 'warning', message: t('chat.insert.busy') })
         return false
       } catch (e) {
@@ -2384,11 +2548,14 @@ export function ChatProvider({ children }: { children: ReactNode }): React.JSX.E
       pendingInserts: insertStates.get(currentSessionId) ?? NO_INSERTS,
       memberProgress: progressStates.get(currentSessionId) ?? NO_PROGRESS,
       withdrawInserts,
-      onInsertsReturned
+      onInsertsReturned,
+      contextUsage,
+      side
     }
   }, [
     sessions,
     allSessions,
+    sideId,
     pendingCards,
     dropPendingCard,
     currentSessionId,
@@ -2398,6 +2565,7 @@ export function ChatProvider({ children }: { children: ReactNode }): React.JSX.E
     progressStates,
     messages,
     streaming,
+    contextUsage,
     streamStatus,
     sessionStates,
     currentBinding,
