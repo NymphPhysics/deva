@@ -5,13 +5,14 @@
 # （包括托盘驻留的那几个进程），再执行 pnpm package:win，最后把结果写进日志并弹个提示。
 #
 # 用法：在 PowerShell 里执行
-#   powershell -ExecutionPolicy Bypass -File D:\deva\repo\scripts\package-after-exit.ps1
+#   powershell -ExecutionPolicy Bypass -File <仓库>\scripts\package-after-exit.ps1
 # 然后正常退出 Deva 即可（托盘图标右键退出，不是只关窗口）。
 #
-# 日志：D:\deva\repo\package-after-exit.log
+# 日志：写到脚本所在仓库根目录下的 package-after-exit.log
 
 $ErrorActionPreference = 'Stop'
-$repo = 'D:\deva\repo'
+# 仓库根 = 脚本所在目录的上一级（scripts/ 的父目录）。不写死本机路径：换机器、换盘符都能用。
+$repo = Split-Path -Parent $PSScriptRoot
 $log = Join-Path $repo 'package-after-exit.log'
 
 # MessageBox 在 Windows PowerShell 里要显式加载，否则调用时抛「找不到类型」。
@@ -58,10 +59,11 @@ try {
 }
 
 if ($code -eq 0) {
+  $exe = Join-Path $repo 'apps\desktop\dist\win-unpacked\Deva.exe'
   Write-Log '打包成功。'
-  Write-Log "从 D:\deva\repo\apps\desktop\dist\win-unpacked\Deva.exe 启动即可。"
+  Write-Log "从 ${exe} 启动即可。"
   [System.Windows.Forms.MessageBox]::Show(
-    "打包成功，可以启动 Deva 了。`n`n路径：D:\deva\repo\apps\desktop\dist\win-unpacked\Deva.exe",
+    "打包成功，可以启动 Deva 了。`n`n路径：${exe}",
     'Deva 打包完成') | Out-Null
 } else {
   Write-Log "打包失败，退出码 ${code}。完整输出见 ${log}"

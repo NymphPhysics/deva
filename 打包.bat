@@ -9,5 +9,6 @@ echo      (closing the window is not enough, it stays in the tray)
 echo.
 echo   2. This script then builds automatically and shows a popup when done.
 echo.
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File "D:\deva\repo\scripts\package-after-exit.ps1"
+rem %~dp0 = the folder this .bat lives in (the repo root). No hardcoded paths.
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0scripts\package-after-exit.ps1"
 pause
