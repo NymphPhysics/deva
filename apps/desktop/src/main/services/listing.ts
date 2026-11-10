@@ -24,6 +24,7 @@ import {
   listMemories,
   type MemoryEntry
 } from './memory'
+import { NO_FOLDER } from './members'
 
 /** 内容摘要：内容变了即视为更新，需重新告知。 */
 function digestOf(content: string): string {
@@ -81,24 +82,28 @@ function diffListing<T>(
 }
 
 /**
- * 请求模型前调用：build 据历史算出清单块（无差异给 null），附到历史末条——它是这次请求才首次发出的那条
- * user 消息（用户提问 / 工具结果），附上去不碰已缓存的前缀。已告知过则 build 给 null，故重连重发时调用多少次都一样。
+ * 请求模型前调用：build 据历史算出清单块（可给多块，按序附上；无差异给 null），附到历史末条——它是这次请求才
+ * 首次发出的那条 user 消息（用户提问 / 工具结果），附上去不碰已缓存的前缀。已告知过则 build 给 null，故重连重发时
+ * 调用多少次都一样。
  * 末条是带标记的字符串消息（压缩摘要 / 自愈引导 / 后台通知）时不附：它们靠字符串前缀识别，改成块数组就
  * 认不出了——留给下一条消息（多为下一步的工具结果）。
  */
-export function attachListing(history: Message[], build: (history: Message[]) => TextPart | null): void {
+export function attachListing(
+  history: Message[],
+  build: (history: Message[]) => TextPart | null | (TextPart | null)[]
+): void {
   const i = history.length - 1
   const last = history[i]
   if (!last || last.role !== 'user') return
   if (isCompactionSummary(last) || isAutoNudge(last) || isTaskNotification(last)) return
-  const part = build(history)
-  if (!part) return
+  const parts = [build(history)].flat().filter((p): p is TextPart => p !== null)
+  if (!parts.length) return
   let content: ContentPart[]
-  if (typeof last.content === 'string') content = [part, { type: 'text', text: last.content }]
+  if (typeof last.content === 'string') content = [...parts, { type: 'text', text: last.content }]
   // 工具结果消息：协议要求 tool_result 块在前，文字跟在后面（同后台任务通知）。
-  else if (last.content.some((p) => p.type === 'tool_result')) content = [...last.content, part]
+  else if (last.content.some((p) => p.type === 'tool_result')) content = [...last.content, ...parts]
   // 用户提问：放最前，提问正文仍是最后一个 text 块（展示层只取它作气泡正文）。
-  else content = [part, ...last.content]
+  else content = [...parts, ...last.content]
   // 换新对象而不就地改：fork 的历史与主对话共享消息对象，按不可变对待。
   history[i] = { ...last, content }
 }
@@ -218,26 +223,34 @@ export interface MemberListingItem {
   duty: string
   /** 被 @ 加入的角色：记下角色名，名单里注明。 */
   fromRole?: string
+  /** 在本对话中运行的定时任务（不是成员，但同样可以 member_send / member_status）：人读的日程。duty 是指令开头。 */
+  schedule?: string
 }
 
 function memberLine(m: MemberListingItem): string {
-  const where = m.folder === '不限' ? '' : `（负责 ${m.folder}）`
+  if (m.schedule) return `- ${m.name}［定时任务：${m.schedule}］：${m.duty || '（未写指令）'}`
+  const where = m.folder === NO_FOLDER ? '（未指定文件夹）' : `（负责 ${m.folder}）`
   const role = m.fromRole ? `［协助者：用户 @ 请来的角色「${m.fromRole}」］` : ''
   return `- ${m.name}${where}${role}：${m.duty || '（未写职责）'}`
 }
+
+/** 名单一项的内容摘要原文。定时任务才拼上日程——成员照旧，已告知的成员不会因此被重发一遍。 */
+function memberContent(m: MemberListingItem): string {
+  return `${m.folder}|${m.duty}|${m.fromRole ?? ''}${m.schedule ? `|${m.schedule}` : ''}`
+}
+
+/** 名单里出现定时任务时附的说明：它们不是成员，能做什么、不能做什么。 */
+const TASK_LISTING_NOTE =
+  '标「定时任务」的不是成员，是在本对话中运行的定时任务：它按时自动运行，把结果以自己的身份发到本对话（较长的在你的上下文里只留标题）。' +
+  '用户追问它发来的内容时，用 member_send 转给它，由它在自己的对话里回答；需要它最近一次发来的全文（如转给别的成员）时用 member_status。' +
+  '不要给它派与它的任务无关的工作。'
 
 /**
  * 本对话的项目成员名单（见 members.ts）与历史里已告知的差异；一致则返回 null。
  * 名单只记名字、文件夹、职责——成员忙闲随时在变，不进名单（派任务时工具结果会说明）。
  */
 export function memberListingPart(history: Message[], members: MemberListingItem[]): TextPart | null {
-  const d = diffListing(
-    history,
-    'members',
-    members,
-    (m) => m.name,
-    (m) => `${m.folder}|${m.duty}|${m.fromRole ?? ''}`
-  )
+  const d = diffListing(history, 'members', members, (m) => m.name, memberContent)
   if (!d) return null
   const lines: string[] = []
   if (d.initial) {
@@ -254,14 +267,12 @@ export function memberListingPart(history: Message[], members: MemberListingItem
       )
     if (d.removed.length) lines.push(`以下成员已移除，不要再派任务给他们：${d.removed.join('、')}`)
   }
+  if (d.listed.some((m) => m.schedule)) lines.push(TASK_LISTING_NOTE)
   lines.push('（以上由系统自动附带，不是用户发来的消息；成员再有增减时会另行告知，以最近的告知为准。）')
   return { type: 'text', text: lines.join('\n'), listing: d.record }
 }
 
 /** create_member / @ 加入成功：结果里已写明该成员，记为已告知（挂在 tool_result 或提示块上）。 */
 export function memberAddedRecord(m: MemberListingItem): ListingRecord {
-  return {
-    kind: 'members',
-    listed: [{ key: m.name, digest: digestOf(`${m.folder}|${m.duty}|${m.fromRole ?? ''}`) }]
-  }
+  return { kind: 'members', listed: [{ key: m.name, digest: digestOf(memberContent(m)) }] }
 }

@@ -802,18 +802,25 @@ body.cf-resizing-y * {
 .cf-group__face {
   position: absolute;
 }
+/* 小号的会话群组头像（定时任务「运行方式」列表）：按 38px 的群组头像整体缩放（见 SessionFace） */
+.cf-sessface {
+  display: block;
+  width: 38px;
+  height: 38px;
+}
 /* 堆叠效果：重叠处沿头像形状画一圈与行底同色的分隔环（SVG 里的 --hm-ring），外露 2px */
 .cf-group.is-overlap .cf-group__face {
   --hm-ring: var(--row-bg);
   --hm-ring-w: 4px;
 }
-/* 超过四人：第 4 枚盖半透明深色层（按头像形状蒙版）写白色 +N，任何头像颜色上都看得清 */
+/* 超过四人：第 4 枚盖半透明深色层写白色 +N，任何头像颜色上都看得清。深色层画在头像 SVG 里（PersonaFace veil），
+   与底板同形，生成中跟着变成星芒；这里只放文字。 */
 .cf-group__more {
   position: absolute;
   inset: 0;
   display: grid;
   place-items: center;
-  background: rgba(0, 0, 0, 0.38);
+  pointer-events: none;
   color: #fff;
   /* 遮罩调浅后浅色头像上白字偏弱，加一点柔和投影托住 */
   text-shadow: 0 0 2px rgba(0, 0, 0, 0.45);
@@ -960,49 +967,7 @@ body.cf-resizing-y * {
   object-fit: cover;
 }
 
-/* 忙碌（对话生成中）：一道高光斜带自左向右扫过头像，作就地「思考/生成中」指示。
-   遮层与 .cf-ava__face 同框（inset:0），按头像形状蒙版（行内 mask，形状恒铺满头像框），故光带只在底板内可见。 */
-.cf-ava__sweep {
-  position: absolute;
-  inset: 0;
-  overflow: hidden;
-  pointer-events: none;
-}
-/* 光带本体：一条 40% 宽、倾斜 25° 的渐变竖条，靠 left 位移扫过（不用 transform 是为了让
-   rotate 保持静态、位移单独走动画，二者互不干扰）。
-   亮芯两侧各压一道极淡暗边：生成头像的底色（BG_TONES）里有马卡龙浅底，自定义照片也什么底都有，
-   浅底上单靠白亮芯几乎看不见。暗边就是给浅底兜底——深底白亮一闪、
-   浅底「暗—亮—暗」一道波纹，两种都读得出。别当多余删掉。 */
-.cf-ava__sweep::after {
-  content: '';
-  position: absolute;
-  top: -50%;
-  left: -60%;
-  width: 40%;
-  height: 200%;
-  background: linear-gradient(
-    100deg,
-    transparent 0%,
-    rgba(0, 0, 0, 0.12) 28%,
-    rgba(255, 255, 255, 0.85) 50%,
-    rgba(0, 0, 0, 0.12) 72%,
-    transparent 100%
-  );
-  transform: rotate(25deg);
-  animation: cf-sweep 2.2s ease-in-out infinite;
-}
-/* 扫到头后留一段停顿（65%→100%），读起来是「一闪一闪」而非连续频闪。 */
-@keyframes cf-sweep {
-  0% {
-    left: -60%;
-  }
-  65% {
-    left: 120%;
-  }
-  100% {
-    left: 120%;
-  }
-}
+/* 忙碌（对话生成中）不在这里画：头像底板变成星芒并转动，见 components/humation.tsx 的 useBusyMorph。 */
 
 /* 待你处理 / 有新消息：头像右上角一枚静态红点。 */
 .cf-ava__dot {
@@ -1028,15 +993,6 @@ body.cf-resizing-y * {
   background: var(--danger);
   box-shadow: 0 0 0 2px var(--bg-inset);
   pointer-events: none;
-}
-
-/* 减动效：停动画，但把光带停在头像中间当静态高光——否则它停在 left:-60% 整个看不见，
-   忙碌状态就彻底没了指示。 */
-@media (prefers-reduced-motion: reduce) {
-  .cf-ava__sweep::after {
-    animation: none;
-    left: 30%;
-  }
 }
 
 /* ---------------------------- 中列：单人对话 ---------------------------- */
@@ -1921,6 +1877,168 @@ body.cf-resizing-y * {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+/*
+ * 高度可过渡的折叠块（见 ChatFirstShell Fold）：收起 = 行高 1fr → 0fr + 淡出，展开反之。内容裁在 .cf-fold__in 里；
+ * 收起后内容 visibility: hidden（等过渡放完才藏，不能再被 Tab 到）。时长用 --fold-dur，各处自己覆盖。
+ */
+.cf-fold {
+  --fold-dur: 0.22s;
+  display: grid;
+  grid-template-rows: 1fr;
+  transition:
+    grid-template-rows var(--fold-dur) ease,
+    opacity var(--fold-dur) ease,
+    margin-top var(--fold-dur) ease;
+}
+.cf-fold > .cf-fold__in {
+  min-height: 0;
+  overflow: hidden;
+}
+.cf-fold.is-closed {
+  grid-template-rows: 0fr;
+  opacity: 0;
+}
+.cf-fold.is-closed > .cf-fold__in {
+  visibility: hidden;
+  transition: visibility 0s linear var(--fold-dur);
+}
+@media (prefers-reduced-motion: reduce) {
+  .cf-fold,
+  .cf-fold.is-closed > .cf-fold__in {
+    transition: none;
+  }
+}
+
+/*
+ * 成员在等你处理（对话末尾，见 MemberAsks，对比稿 design/member-ask-inline.html 方案 A）：每件一枚居中胶囊，外观同上面的
+ * .cf-mprogress__pill；展开的那件下面直接是卡片（宽同定时任务交来的结果 560px，卡头由胶囊代替）。处理完换成回执胶囊，
+ * 全部处理完后一起收起（MemberAsks 的 MEMBER_RECEIPT_HOLD_MS / MEMBER_ROW_OUT_MS 与这里的 --fold-dur 对应）。
+ * 几件排成一组（.cf-masks）：胶囊之间行距 8px，比消息列的 20px 紧；展开的卡片与下一枚胶囊之间 16px，免得胶囊看着像挂在
+ * 上一张卡下面。一行是一个折叠块，收起时连同组内行距一起收掉；整组都收起时，组连同消息列的行距一起收掉——
+ * 都用 margin-top 抵消 gap，贴底时画面平滑下移，不跳。
+ */
+.cf-masks {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  transition: margin-top 0.3s ease;
+}
+.cf-masks:not(:has(> .cf-mask:not(.is-closed))) {
+  margin-top: calc(-1 * var(--space-5));
+}
+.cf-mask {
+  --fold-dur: 0.3s;
+}
+.cf-mask.is-closed {
+  margin-top: calc(-1 * var(--space-2));
+}
+.cf-mask:has(.cf-mask__fold:not(.is-closed)) + .cf-mask:not(.is-closed) {
+  margin-top: calc(var(--space-4) - var(--space-2));
+}
+.cf-mask > .cf-fold__in {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+}
+.cf-mask__pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  max-width: min(100%, 560px);
+  padding: 3px 10px 3px 4px;
+  border: none;
+  border-radius: var(--radius-full);
+  background: var(--bg-inset);
+  font: inherit;
+  font-size: 12px;
+  line-height: 18px;
+  color: var(--fg-muted);
+  white-space: nowrap;
+}
+button.cf-mask__pill {
+  cursor: pointer;
+}
+button.cf-mask__pill:hover {
+  color: var(--fg);
+}
+.cf-mask__text {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+/* 网页上等你操作：胶囊末尾「去处理」 */
+.cf-mask__go {
+  flex: none;
+  color: var(--accent);
+  font-weight: 500;
+}
+.cf-mask__chev {
+  flex: none;
+  color: var(--fg-subtle);
+  transition: transform 0.15s;
+}
+.cf-mask__pill.is-open .cf-mask__chev {
+  transform: rotate(180deg);
+}
+/* 新成员还没有头像：同尺寸的文件夹图标圆片 */
+.cf-mask__icon {
+  flex: none;
+  display: grid;
+  place-items: center;
+  width: 18px;
+  height: 18px;
+  border-radius: var(--radius-full);
+  background: var(--bg-elevated);
+  color: var(--fg-muted);
+}
+/* 回执：绿勾（用户确认色），跳过 / 忽略为灰 */
+.cf-mask__pill.is-done {
+  padding-left: 8px;
+  animation: cf-mcard-in 0.15s ease;
+}
+.cf-mask__pill.is-done svg {
+  flex: none;
+  color: var(--fg-subtle);
+}
+.cf-mask__pill.is-done.is-ok svg {
+  color: var(--success);
+}
+/* 卡片一层折叠块：收起时连同胶囊与卡片之间的 6px 一起收掉 */
+.cf-mask__fold {
+  width: min(100%, 560px);
+}
+.cf-mask__fold.is-closed {
+  margin-top: -6px;
+}
+.cf-mask__card > .ask,
+.cf-mask__card > .msg__plan,
+.cf-mask__card > .msg__mount {
+  margin-top: 0;
+  border-radius: var(--radius-lg);
+}
+/* 没有卡头，问题本身当标题 */
+.cf-mask__card .ask__question {
+  font-weight: 600;
+}
+/* 卡片操作行里的「打开对话」：弱化的文字按钮，排在左侧 */
+.cf-mask__open {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 4px;
+  border: none;
+  background: transparent;
+  color: var(--fg-muted);
+  font: inherit;
+  font-size: 12px;
+  font-weight: 400;
+  cursor: pointer;
+}
+.cf-mask__open:hover {
+  color: var(--fg);
 }
 
 /* 底部工作状态指示器（思考中/生成回答/等待作答…）：跳过头像列，与消息正文左缘对齐（同 .cf-msg 的 32px 头像 + 列间距） */
@@ -3448,7 +3566,9 @@ body.cf-resizing-y * {
 }
 
 /* 看大图：遮罩上居中只放图片本身（不套窗口、不加边框），下方一行文件信息。上方让出标题栏，两侧留给切换箭头。
-   不设关闭键（铺满时关闭键挨着系统的关闭按钮，容易误关 Deva），Esc / 点遮罩关闭。 */
+   不设关闭键（铺满时关闭键挨着系统的关闭按钮，容易误关 Deva），Esc / 点遮罩关闭。
+   遮罩深浅与弹窗（.cf-modal__backdrop / .modal__backdrop）一致；浅色主题下底色只是中灰，
+   所以文件信息、切换箭头、读取失败各自垫一层深色半透明底，不靠遮罩衬托白字。 */
 .cf-viewer {
   position: fixed;
   inset: 0;
@@ -3459,7 +3579,7 @@ body.cf-resizing-y * {
   justify-content: center;
   gap: 12px;
   padding: calc(var(--titlebar-h) + 16px) 68px 20px;
-  background: rgba(0, 0, 0, 0.72);
+  background: rgba(0, 0, 0, 0.42);
   -webkit-app-region: no-drag;
   user-select: none;
   outline: none;
@@ -3474,8 +3594,8 @@ body.cf-resizing-y * {
   display: block;
   min-height: 0;
   max-width: 100%;
-  /* 窗口高 − 标题栏 − 上下留白 36 − 间距 12 − 文件信息一行约 20 */
-  max-height: calc(100vh - var(--titlebar-h) - 68px);
+  /* 窗口高 − 标题栏 − 上下留白 36 − 间距 12 − 文件信息一行 24 */
+  max-height: calc(100vh - var(--titlebar-h) - 72px);
   object-fit: contain;
   border-radius: 4px;
   -webkit-user-drag: none;
@@ -3487,6 +3607,9 @@ body.cf-resizing-y * {
   gap: 10px;
   max-width: 100%;
   min-width: 0;
+  padding: 2px 10px;
+  border-radius: var(--radius-full);
+  background: rgba(0, 0, 0, 0.55);
   font-size: 12.5px;
   line-height: 20px;
   color: rgba(255, 255, 255, 0.92);
@@ -3500,7 +3623,7 @@ body.cf-resizing-y * {
 }
 .cf-viewer__meta {
   flex: none;
-  color: rgba(255, 255, 255, 0.6);
+  color: rgba(255, 255, 255, 0.65);
 }
 .cf-viewer__failed {
   display: flex;
@@ -3508,8 +3631,10 @@ body.cf-resizing-y * {
   align-items: center;
   gap: var(--space-2);
   padding: 40px 24px;
+  border-radius: var(--radius-lg);
+  background: rgba(0, 0, 0, 0.55);
   font-size: 13px;
-  color: rgba(255, 255, 255, 0.7);
+  color: rgba(255, 255, 255, 0.75);
 }
 .cf-viewer__nav {
   position: absolute;
@@ -3522,12 +3647,12 @@ body.cf-resizing-y * {
   padding: 0;
   border: 0;
   border-radius: var(--radius-full);
-  background: rgba(255, 255, 255, 0.12);
-  color: rgba(255, 255, 255, 0.85);
+  background: rgba(0, 0, 0, 0.4);
+  color: rgba(255, 255, 255, 0.9);
   cursor: pointer;
 }
 .cf-viewer__nav:hover {
-  background: rgba(255, 255, 255, 0.22);
+  background: rgba(0, 0, 0, 0.6);
   color: #fff;
 }
 .cf-viewer__nav.is-prev {
@@ -3874,8 +3999,16 @@ body.cf-resizing-y * {
   width: 100%;
   height: 100%;
   object-fit: cover;
+  transition: filter 0.15s ease;
 }
-/* 形状不定，不再画圆形描边环；悬停靠遮层提示，键盘聚焦给一圈外框 */
+/* 悬停整枚压暗（同编辑头像的大预览 .cf-avaedit__preview）：用滤镜不用遮层，探出底板的头发、头饰一起暗。 */
+.cf-me__avatar:hover > svg,
+.cf-me__avatar:hover > img,
+.cf-me__avatar:focus-visible > svg,
+.cf-me__avatar:focus-visible > img {
+  filter: brightness(0.55);
+}
+/* 形状不定，不再画圆形描边环；悬停整枚压暗 + 图标提示，键盘聚焦给一圈外框 */
 .cf-me__avatar:focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: 4px;
@@ -3888,7 +4021,7 @@ body.cf-resizing-y * {
   align-items: center;
   justify-content: center;
   color: #fff;
-  background: rgba(0, 0, 0, 0.45);
+  filter: drop-shadow(0 1px 2px rgba(0, 0, 0, 0.45));
   opacity: 0;
   transition: opacity 0.15s ease;
 }
@@ -4151,8 +4284,17 @@ body.cf-resizing-y * {
   width: 100%;
   height: 100%;
   object-fit: cover;
+  transition: filter 0.15s ease;
 }
-/* 悬停遮层：盖住整张头像，浮出上传图标；不悬停时 opacity:0 但仍可点（整块都是入口）。 */
+/* 悬停：整枚头像压暗（对比稿 design/avatar-upload-hover.html 方案 A）。用滤镜而不是盖遮层：头部与头饰画在
+   底板之外（探出），按底板形状裁的遮层只盖得住底板里那半截头；滤镜作用于头像画出的全部内容，探出部分一起暗。 */
+.cf-avaedit__preview:hover > svg,
+.cf-avaedit__preview:hover > img,
+.cf-avaedit__preview:focus-visible > svg,
+.cf-avaedit__preview:focus-visible > img {
+  filter: brightness(0.55);
+}
+/* 上传图标：浮在头像中间，悬停才出现（不悬停时 opacity:0，整块仍可点）；投影保证浅色头像上也看得清。 */
 .cf-avaedit__upload {
   position: absolute;
   inset: 0;
@@ -4160,7 +4302,7 @@ body.cf-resizing-y * {
   align-items: center;
   justify-content: center;
   color: #fff;
-  background: rgba(0, 0, 0, 0.45);
+  filter: drop-shadow(0 1px 2px rgba(0, 0, 0, 0.45));
   opacity: 0;
   transition: opacity 0.15s ease;
 }
@@ -4234,10 +4376,12 @@ body.cf-resizing-y * {
   color: var(--fg-muted);
 }
 /* 配色选择器：自适应网格，每格一枚色板 + 文字 */
+/* 配色（发色 / 肤色 / 上衣色 / 背景色）排成一排：按内容宽度紧挨着排，编辑弹窗里四项正好一行；
+   原先每格至少 110px 的网格只放得下三格，背景色被挤到第二行。窗口窄到放不下时才换行。 */
 .cf-avaedit__colors {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(110px, 1fr));
-  gap: 8px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 16px;
   margin-top: 4px;
 }
 .cf-avaedit__swatch {
@@ -4525,6 +4669,42 @@ body.cf-resizing-y * {
 .cf-tdetail__section {
   width: 100%;
   margin-top: var(--space-5);
+}
+/* 运行历史标题行：左标题，右「查看对话」入口（对比稿 design/task-run-view.html 方案 A）。 */
+.cf-tdetail__sechead {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+  min-height: 24px;
+  margin-bottom: var(--space-2);
+}
+.cf-tdetail__sechead .cf-profile__convs-label {
+  margin-bottom: 0;
+}
+/* 平时一行灰字，悬停变深 + 浅底；任务对话不在（还没运行过 / 被删了）时不显示。 */
+.cf-tdetail__chatlink {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  height: 24px;
+  padding: 0 6px 0 8px;
+  font-size: 12px;
+  white-space: nowrap;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--fg-muted);
+  font-weight: 500;
+  cursor: pointer;
+  transition:
+    background 0.12s ease,
+    color 0.12s ease;
+}
+.cf-tdetail__chatlink:hover {
+  background: var(--bg-hover);
+  color: var(--fg);
 }
 
 /* 操作按钮行（对齐 .cf-profile__actions，但可容纳 4 个动作、自动换行）。 */
@@ -5269,18 +5449,39 @@ body.cf-pop-open * {
 }
 
 /*
- * 绑定在本对话上的定时任务（见 design/task-entry-README.md）：标题栏成员入口旁的闹钟入口与下拉复用 .cf-members__*；
- * 任务没有头像，用管理面板任务行同款的圆角方块图标（.cf-tface）。
+ * 绑定在本对话上的定时任务（见 design/task-entry-README.md）：标题栏成员入口旁的闹钟入口与下拉复用 .cf-members__*。
  */
-.cf-tface {
+/*
+ * 定时任务以自己的身份发言的头像（对比稿 design/task-avatar-badge.html 方案 D）：任务所用角色的头像 + 右下角方形角标。
+ * 角标是半透明浅色遮罩、背后模糊透出头像，托着绿色日历钟（同定时任务页里已完成任务的颜色）；不加底色外圈。
+ */
+.cf-taskface {
+  position: relative;
   flex: none;
-  display: inline-grid;
-  place-items: center;
-  border-radius: var(--radius);
-  background: var(--bg-inset);
-  color: var(--accent);
+  width: var(--sz);
+  height: var(--sz);
 }
-/* 任务行右侧：下次运行时间（暂停时写「已暂停」）；悬停换成「立即运行」「暂停」 */
+.cf-taskface__badge {
+  position: absolute;
+  right: -2px;
+  bottom: -2px;
+  display: grid;
+  place-items: center;
+  width: 16px;
+  height: 16px;
+  border-radius: 4px;
+  background: rgba(255, 255, 255, 0.72);
+  backdrop-filter: blur(3px) saturate(1.3);
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.07);
+  color: var(--success);
+  pointer-events: none;
+}
+/* 深色主题遮罩仍是浅色（与头像对比清楚）；绿色取深一档，浅底上才压得住 */
+:root[data-theme='dark'] .cf-taskface__badge {
+  background: rgba(255, 255, 255, 0.78);
+  color: #2b8a3e;
+}
+/* 任务行右侧：只在暂停时写「已暂停」（不写下次运行时间）；悬停换成「立即运行」「暂停」「删除」 */
 .cf-members__next {
   flex: none;
   align-self: flex-start;
@@ -5322,6 +5523,11 @@ body.cf-pop-open * {
   opacity: 0.4;
   cursor: default;
 }
+/* 删除定时任务：悬停转红（同移除成员） */
+.cf-members__ib.is-danger:hover {
+  color: var(--danger);
+  background: color-mix(in srgb, var(--danger) 8%, transparent);
+}
 /* 任务对话的标题栏：任务名前只放图标（不带灰底），名字后的日程与下次运行时间；右侧立即运行 / 暂停 / 编辑 */
 .cf-conv__ticon {
   flex: none;
@@ -5354,9 +5560,9 @@ body.cf-pop-open * {
 .cf-handoff__pill {
   display: inline-flex;
   align-items: center;
-  gap: 7px;
+  gap: 6px;
   max-width: min(100%, 560px);
-  padding: 3px 10px 3px 4px;
+  padding: 3px 10px 3px 8px;
   border: none;
   border-radius: var(--radius-full);
   background: var(--bg-inset);
@@ -5371,6 +5577,11 @@ body.cf-pop-open * {
 .cf-handoff__pill b {
   font-weight: 600;
   color: var(--fg);
+}
+/* 胶囊与全文框标题前的日历钟：绿色（同任务发言头像的角标、定时任务页里已完成任务的图标） */
+.cf-handoff__ic {
+  flex: none;
+  color: var(--success);
 }
 .cf-handoff__text {
   min-width: 0;
@@ -5519,7 +5730,7 @@ body.cf-pop-open * {
   color: var(--fg-muted);
 }
 
-/* ── 项目成员：交差通知的锚点 / 等你处理的通知行（见 ChatFirstShell MemberWaits） ── */
+/* ── 项目成员：交差通知的锚点 ── */
 
 /* 成员交差的通知：不显示，只留一个不占高度的锚点（抵消消息列的行间距）。 */
 .cf-msg.is-quiet {
@@ -5527,97 +5738,4 @@ body.cf-pop-open * {
   height: 0;
   margin-top: calc(-1 * var(--space-5));
   overflow: hidden;
-}
-
-/* 输入框上方：成员在等你回答 / 批准 / 选文件夹，一条一行，点开当场处理。 */
-.cf-mwaits {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-  margin-bottom: var(--space-2);
-}
-.cf-mwait {
-  border: 1px solid var(--border);
-  border-radius: var(--radius-lg);
-  background: var(--bg-elevated);
-  box-shadow: var(--shadow);
-  overflow: hidden;
-}
-.cf-mwait__row {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  width: 100%;
-  min-height: 34px;
-  padding: 5px 10px 5px 8px;
-  border: none;
-  background: transparent;
-  color: var(--fg);
-  font: inherit;
-  font-size: 12.5px;
-  text-align: left;
-  cursor: pointer;
-}
-.cf-mwait__row:hover {
-  background: var(--bg-hover);
-}
-.cf-mwait__text {
-  flex: none;
-  font-weight: 500;
-}
-/* 新成员还没有头像：用同尺寸的文件夹图标圆片代替 */
-.cf-mwait__icon {
-  flex: none;
-  display: grid;
-  place-items: center;
-  width: 18px;
-  height: 18px;
-  border-radius: var(--radius-full);
-  background: var(--bg-inset);
-  color: var(--fg-muted);
-}
-.cf-mwait__sub {
-  flex: 1 1 auto;
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  color: var(--fg-muted);
-}
-.cf-mwait__act {
-  flex: none;
-  margin-left: auto;
-  display: inline-flex;
-  align-items: center;
-  gap: 2px;
-  color: var(--accent);
-  font-weight: 500;
-}
-.cf-mwait__act svg {
-  transition: transform 0.15s ease;
-}
-.cf-mwait.is-open .cf-mwait__act svg {
-  transform: rotate(180deg);
-}
-.cf-mwait__card {
-  max-height: min(55vh, 480px);
-  overflow-y: auto;
-  padding: 2px 12px 10px;
-  border-top: 1px solid var(--border);
-}
-.cf-mwait__open {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  margin-top: 6px;
-  padding: 2px 4px;
-  border: none;
-  background: transparent;
-  color: var(--fg-muted);
-  font: inherit;
-  font-size: 12px;
-  cursor: pointer;
-}
-.cf-mwait__open:hover {
-  color: var(--fg);
 }

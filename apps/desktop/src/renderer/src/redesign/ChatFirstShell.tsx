@@ -72,7 +72,7 @@ import {
   X
 } from 'lucide-react'
 import { BotsPane } from './BotsPane'
-import { useComposerEditor, type ComposerKey } from './composer-editor'
+import { triggerReplaceEnd, useComposerEditor, type ComposerKey, type ComposerTrigger } from './composer-editor'
 import { AttachmentList } from './attachments'
 import { UpdateSection } from './UpdateSection'
 // 关于页的应用图标：直接用安装包图标的源文件，图形只维护一份
@@ -96,7 +96,13 @@ import type {
   TaskStatus
 } from '../../../preload'
 import { ScheduleEditor } from '../features/chat/ScheduleEditor'
-import { TaskModelSelect, TaskPersonaSelect } from '../features/chat/TaskPickers'
+import {
+  RUN_CHAT_TITLE_DETAIL,
+  TaskModelSelect,
+  TaskPersonaSelect,
+  TaskRunModeSelect,
+  clipChatTitle
+} from '../features/chat/TaskPickers'
 import { taskErrorKey } from '../features/chat/TaskConfirmCard'
 import { TodoCapsule } from '../features/chat/Todos'
 import { BackgroundCapsule } from '../features/chat/BackgroundTasks'
@@ -177,7 +183,8 @@ import {
   groupBlocks,
   hasProcess,
   splitProcess,
-  MemberFaceContext
+  MemberFaceContext,
+  TaskNamesContext
 } from '../features/chat/blocks'
 import { ModelSettings } from '../features/settings/ModelSettings'
 import { AvatarEditor } from './AvatarEditor'
@@ -316,13 +323,16 @@ const TOC_VISIBLE_MAX = 10
 /** 系统默认角色 id（首启种子「Deva」，id 恒为 general）：兼作兜底身份，且不允许删除。 */
 const DEFAULT_PERSONA_ID = 'general'
 
-/** 一次挑选返回的附件（与 preload PickedAttachment 结构一致）；拖入 / 粘贴的文件夹也放这里，kind 为 folder。 */
+/**
+ * 一次挑选返回的附件（与 preload PickedAttachment 结构一致）；拖入 / 粘贴的文件夹也放这里，kind 为 folder。
+ * kind 为 file：内容读不进消息（Word 等格式、超过体积上限），发送时只把位置交给模型。
+ */
 interface Picked {
   path: string
   name: string
   ext: string
   size: number
-  kind: 'image' | 'document' | 'text' | 'folder' | 'unsupported'
+  kind: 'image' | 'document' | 'text' | 'folder' | 'file' | 'unsupported'
   supported: boolean
   reason?: string
 }
@@ -385,7 +395,7 @@ export function ChatFirstShell(): React.JSX.Element {
     side
   } = useChat()
   const { personas, remove, reorderPersonas } = useExtensions()
-  const { tasks, setStatus: setTaskStatus, runNow: runTaskNow, update: updateTask } = useTasks()
+  const { tasks, setStatus: setTaskStatus, runNow: runTaskNow, update: updateTask, remove: removeTask } = useTasks()
   const { t, locale } = useI18n()
   const dialog = useDialog()
   const toast = useToast()
@@ -524,6 +534,20 @@ export function ChatFirstShell(): React.JSX.Element {
     [personas]
   )
   const defaultPersonaId = defaultPersona?.id
+
+  // 定时任务以自己的身份发言时的头像用任务所用的角色（未指定或角色已删 = 默认角色，同主进程执行时），见 TaskSpeakerFace。
+  // 消息里只记了任务名：先找在当前对话中运行的同名任务，再找全部（改为独立运行后，旧消息仍按原角色画）。
+  const taskPersonaOf = useCallback(
+    (title: string): Persona | undefined => {
+      const name = title.trim()
+      const task =
+        tasks.find((x) => x.ownerSessionId === currentSessionId && x.title === name) ??
+        tasks.find((x) => x.title === name)
+      const pid = task?.auth.personaId
+      return (pid ? personas.find((p) => p.id === pid) : undefined) ?? defaultPersona
+    },
+    [tasks, personas, defaultPersona, currentSessionId]
+  )
 
   // 对话归属的角色：未绑定、或绑定的角色已不存在（如手动删了角色文件）一律算默认角色，与主进程执行时一致
   // （见 personas.ts resolvePersonaId）。列表头像、筛选、搜索、资料卡都读这里；只改显示，不改对话里存的绑定。
@@ -740,29 +764,42 @@ export function ChatFirstShell(): React.JSX.Element {
   const toggleBoundTask = (task: TaskRecord): void => {
     void setTaskStatus(task.id, task.status === 'active' ? 'paused' : 'active')
   }
+  // 对话里定时任务列表的「删除」：先弹确认框（同定时任务页）；在会话中运行的任务连它的任务对话一起删（见主进程
+  // tasks.ts deleteTask）。
+  const deleteBoundTask = (task: TaskRecord): void => {
+    const name = clipName(task.title || t('chat.untitled'))
+    void (async () => {
+      const ok = await dialog.confirm({
+        title: locale === 'en' ? `Delete task “${name}”?` : `删除定时任务 ${name} ？`,
+        message: t(task.ownerSessionId ? 'tasks.deleteBoundConfirm' : 'tasks.deleteConfirm'),
+        variant: 'danger',
+        confirmText: t('cf.delete')
+      })
+      if (ok) await removeTask(task.id)
+    })()
+  }
 
   // 右键删除（对话 / 角色）：先弹居中确认框（破坏性 → 红色确认键），确认后才走既有删除通路——
   // 对话经 deleteSession（中止在跑回合 + 落盘删除 + 切到最近会话），角色经 remove('persona')。
   // 标题直接写成「删除对话 xxx ？/删除角色 xxx ？」这一动作问句（比裸标题更醒目），随语言拼装；
   // 名字经 clipName 限长，过长截断补「…」，免得撑宽 / 撑高弹框。
-  // 主对话的成员、绑定的定时任务及它们的对话会一并删除：确认框里写明。
+  // 主对话的成员及它们的对话会一并删除；在它里面运行的定时任务改为独立运行：确认框里写明。
   const deleteThread = (id: string, title: string): void => {
     const name = clipName(title || t('chat.untitled'))
     const heading = locale === 'en' ? `Delete conversation “${name}”?` : `删除对话 ${name} ？`
     const mem = (sessions.find((x) => x.id === id)?.members ?? []).filter((m) => !m.removed)
     const owned = boundTasks.filter((x) => x.ownerSessionId === id)
     const sep = t('cf.member.nameSep')
-    const items = [
-      ...(mem.length
-        ? [fill(t('cf.deleteChatMembers'), { n: String(mem.length), names: mem.map((m) => m.name).join(sep) })]
-        : []),
-      ...(owned.length
-        ? [fill(t('cf.deleteChatTasks'), { n: String(owned.length), names: owned.map((x) => x.title).join(sep) })]
-        : [])
-    ]
-    const message = items.length
-      ? `${t('cf.deleteChatConfirm')}${fill(t('cf.deleteChatCascade'), { items: items.join(locale === 'en' ? '; ' : '；') })}`
-      : t('cf.deleteChatConfirm')
+    const items = mem.length
+      ? [fill(t('cf.deleteChatMembers'), { n: String(mem.length), names: mem.map((m) => m.name).join(sep) })]
+      : []
+    const message =
+      (items.length
+        ? `${t('cf.deleteChatConfirm')}${fill(t('cf.deleteChatCascade'), { items: items.join(locale === 'en' ? '; ' : '；') })}`
+        : t('cf.deleteChatConfirm')) +
+      (owned.length
+        ? fill(t('cf.deleteChatTasksAlone'), { n: String(owned.length), names: owned.map((x) => x.title).join(sep) })
+        : '')
     void (async () => {
       const ok = await dialog.confirm({
         title: heading,
@@ -915,6 +952,7 @@ export function ChatFirstShell(): React.JSX.Element {
             target={tasksTarget}
             onTargetConsumed={() => setTasksTarget(null)}
             onAddByChat={addTaskByChat}
+            onOpenChat={openThread}
           />
         ) : (
           <>
@@ -996,9 +1034,11 @@ export function ChatFirstShell(): React.JSX.Element {
                 onRemoveMember={(m) => removeMemberFrom(currentSessionId, m)}
                 pendingCards={pendingCards}
                 boundTasks={taskOf || memberOf ? [] : boundTasks.filter((x) => x.ownerSessionId === currentSessionId)}
+                taskPersonaOf={taskPersonaOf}
                 onOpenTask={(task) => selectSession(task.sessionId)}
                 onRunTask={runBoundTask}
                 onToggleTask={toggleBoundTask}
+                onDeleteTask={deleteBoundTask}
                 onEditTask={(task) => setEditTaskId(task.id)}
                 taskView={
                   taskOf
@@ -1035,11 +1075,13 @@ export function ChatFirstShell(): React.JSX.Element {
 
       {editor && <PersonaEditor initial={editor} onClose={() => setEditor(null)} />}
       {settingsOpen && <Settings initial={settingsInit} onClose={() => setSettingsOpen(false)} />}
-      {/* 从任务对话标题栏「编辑任务」打开的表单（同管理页）。 */}
+      {/* 从任务对话标题栏「编辑任务」打开的表单（同管理页）。不显示运行方式：这里是从某个对话进来的，改到别的对话后
+          「返回」就会回到那个对话；运行方式到定时任务页里改。 */}
       {editTask && (
         <TaskFormModal
           key={editTask.id}
           task={editTask}
+          hideRunMode
           onClose={() => setEditTaskId(null)}
           onSubmit={async (input) => {
             await updateTask({ id: editTask.id, ...input })
@@ -1082,7 +1124,7 @@ function memberPersona(m: MemberMeta, personas: Persona[], fallback?: Persona): 
 
 /**
  * 标题栏角色名后的成员入口（对比稿 design/member-entry.html 方案 A）：只写「👥 N」，不放头像、不亮状态点——尽量不吸引
- * 注意力；成员在等你处理时输入框上方另有一行（见 MemberWaits），入口上不再重复。点开下拉出成员列表：顶部一行「N 位成员」，
+ * 注意力；成员在等你处理时对话末尾另有胶囊（见 MemberAsks），入口上不再重复。点开下拉出成员列表：顶部一行「N 位成员」，
  * 不写「几位工作中」之类的汇总；每行头像与名字，工作中 / 在等你处理时名字后一枚状态签，第二行是正在做的任务与用时 / 最近一次
  * 的结果 / 职责。点一行直接切到该成员的对话；悬停时行尾出现「移除成员」。没有成员时不占位置。
  */
@@ -1237,12 +1279,17 @@ function MemberBar({
 }
 
 /**
- * 成员正等你处理的卡（提问 / 计划 / 选文件夹）：主对话输入框上方一条一行，点开当场处理，处理完就消失。
- * 成员请你在网页上登录等（内置浏览器的 handoff）同样一行，点「去处理」打开浏览器窗口到那个网页。
- * 这些卡不进主对话、也不经主角色，答复直接回到成员的那一轮（对比稿 design/member-direct.html 的结论）。
+ * 成员正等你处理的事（对比稿 design/member-ask-inline.html 方案 A）：主对话末尾、「N 位成员已完成」之后，每件一枚居中胶囊
+ * 「后端在等你回答」（外观同 MemberProgressNotice），只写谁在等什么，不写问题 / 计划的具体内容。最早的一件在胶囊下面直接
+ * 展开卡片（提问 / 计划 / 选文件夹；卡头由胶囊代替，操作行里「打开对话」进成员的对话），其余收成胶囊排在下面，点胶囊收起 /
+ * 展开。处理完卡片收起，胶囊换成「✓ 已回答后端」留在原位，下一件自动展开；等这一批全部处理完（没有还在等的）约 1 秒后，
+ * 回执一起收起——几位成员同时在等、或主角色连着建几位成员时，不会处理一件就少一行、跳一下。出现、展开、收起、离开都是高度过渡（见 Fold），
+ * 贴底时画面跟着平滑移动，不会跳一下。成员请你在网页上登录等（内置浏览器的
+ * handoff）只放胶囊，点了打开浏览器窗口到那个网页。
+ * 这些卡不进主对话记录、也不经主角色，答复直接回到成员的那一轮（对比稿 design/member-direct.html 的结论）。
  */
 /**
- * 输入框上方的一条等你处理：成员会话里的提问 / 计划 / 选文件夹（sid = 成员会话），或主角色建成员时为新成员选文件夹
+ * 一件等你处理的事：成员会话里的提问 / 计划 / 选文件夹（sid = 成员会话），或主角色建成员时为新成员选文件夹
  * （sid = 主对话，isNew：成员还没建，没有头像和对话），或成员请你在网页上登录等（handoff：内置浏览器里等你操作的那个标签）。
  */
 type MemberWait = {
@@ -1256,7 +1303,71 @@ type MemberWait = {
 type BrowserHandoffWait = { tab: string; reason: string; message: string }
 const BROWSER_WAIT_REASONS = new Set(['login', 'captcha', 'upload', 'confirm', 'other'])
 
-function MemberWaits({
+/**
+ * 全部处理完（没有还在等的）后，回执「✓ 已回答后端」再停留多久一起收起（毫秒）。也是连着来的下一件的宽限：主角色一步里
+ * 建几位成员时，选文件夹的卡是逐张弹出的，选完一张到下一张出现之间这一下不算「全部处理完」。
+ */
+const MEMBER_RECEIPT_HOLD_MS = 1100
+/** 一行（胶囊 + 卡片）收起的时长（毫秒），同 CSS .cf-mask 的 --fold-dur；放完再移除。 */
+const MEMBER_ROW_OUT_MS = 300
+
+/** 一件等你处理的事的稳定标识（React key、展开状态都用它）。 */
+const memberWaitId = (w: MemberWait): string => (w.handoff ? `ho:${w.sid}` : `${w.sid}:${w.card.key}`)
+
+/**
+ * 正在离开的一行：你刚处理完的（text = 回执文案，先停留再收起），或在别处处理掉 / 撤销的（text 为空，直接收起）。
+ * 离开期间照旧画在原来的位置（同一个 key、同一个 DOM），收起的过渡才连得上；卡片也还是那张，你的选择不会闪掉。
+ */
+type MemberAskLeaving = {
+  seq: number
+  id: string
+  wait: MemberWait
+  /** 离开时排在第几行：留在原位收起。 */
+  index: number
+  text: string
+  ok: boolean
+  /** 整行开始收起。 */
+  out: boolean
+}
+
+/**
+ * 高度可过渡的折叠块：收起 = 行高 0fr + 淡出（CSS .cf-fold），展开反之；新出现的从收起态展开。
+ * instant：挂载时直接是展开态，不放进场过渡（切到这个对话时已经在的几件）。
+ * 收起后内容 visibility: hidden（过渡放完才藏），不能再被 Tab 到。
+ */
+function Fold({
+  open,
+  instant,
+  className,
+  children
+}: {
+  open: boolean
+  instant?: boolean
+  className: string
+  children: React.ReactNode
+}): React.JSX.Element {
+  const [ready, setReady] = useState(!!instant)
+  useEffect(() => {
+    if (ready) return
+    // 先以收起态画出一帧，下一帧再展开，过渡才有起点。
+    let r2 = 0
+    const r1 = requestAnimationFrame(() => {
+      r2 = requestAnimationFrame(() => setReady(true))
+    })
+    return () => {
+      cancelAnimationFrame(r1)
+      cancelAnimationFrame(r2)
+    }
+  }, [ready])
+  const closed = !open || !ready
+  return (
+    <div className={`cf-fold ${className}${closed ? ' is-closed' : ''}`} aria-hidden={closed || undefined}>
+      <div className="cf-fold__in">{children}</div>
+    </div>
+  )
+}
+
+function MemberAsks({
   waits,
   onAsk,
   onPlan,
@@ -1268,33 +1379,136 @@ function MemberWaits({
   onPlan: (key: string, decision: 'approve' | 'keep' | 'ignore', feedback?: string, sessionId?: string) => void
   onMountReq: (key: string, path: string | null, sessionId?: string) => void
   onOpenMember: (memberSessionId: string) => void
-}): React.JSX.Element {
+}): React.JSX.Element | null {
   const { t } = useI18n()
-  const [openKey, setOpenKey] = useState<string | null>(null)
+  // 展开的那件：undefined = 自动（最早一件卡片），null = 用户收起了，字符串 = 用户点开的那件（不在了按自动处理）。
+  const [open, setOpen] = useState<string | null | undefined>(undefined)
+  const [leaving, setLeaving] = useState<MemberAskLeaving[]>([])
+  // 挂载时已在的几件：直接显示，不放进场过渡。
+  const [initialIds] = useState(() => new Set(waits.map(memberWaitId)))
+  const seq = useRef(0)
+  const timers = useRef<number[]>([])
+  const scheduled = useRef(new Set<number>())
+  useEffect(() => () => timers.current.forEach((h) => window.clearTimeout(h)), [])
+
+  const resolveOpen = (list: MemberWait[]): string | null => {
+    const cards = list.filter((w) => !w.handoff)
+    if (open === null) return null
+    if (open !== undefined && cards.some((w) => memberWaitId(w) === open)) return open
+    return cards.length ? memberWaitId(cards[0]) : null
+  }
+
+  // 在别处处理掉 / 撤销的（成员对话里答了、网页上登录完了、成员被停止）：同样留在原位收起，不突然少一截。
+  const sig = waits.map(memberWaitId).join('\n')
+  const [prev, setPrev] = useState(() => ({ sig, waits }))
+  if (prev.sig !== sig) {
+    const cur = new Set(waits.map(memberWaitId))
+    const gone = prev.waits
+      .map((w, index) => ({ w, index }))
+      .filter(({ w }) => !cur.has(memberWaitId(w)) && !leaving.some((l) => l.id === memberWaitId(w)))
+    if (gone.length)
+      setLeaving((ls) => [
+        ...ls,
+        ...gone.map(({ w, index }) => ({
+          seq: ++seq.current,
+          id: memberWaitId(w),
+          wait: w,
+          index,
+          text: '',
+          ok: false,
+          out: true
+        }))
+      ])
+    setPrev({ sig, waits })
+  }
+
+  // 开始收起的行：放完收起过渡即移除。
+  useEffect(() => {
+    for (const l of leaving) {
+      if (!l.out || scheduled.current.has(l.seq)) continue
+      scheduled.current.add(l.seq)
+      timers.current.push(window.setTimeout(() => setLeaving((ls) => ls.filter((x) => x.seq !== l.seq)), MEMBER_ROW_OUT_MS))
+    }
+  }, [leaving])
+
+  // 回执留在原位，直到没有还在等的（含网页上等你操作的）：再停留片刻，一起收起。期间又来了一件就重新等。
+  const holding = leaving.some((l) => !l.out)
+  // 你刚处理的那件在主进程撤下之前仍在 waits 里，不算还在等。
+  const pendingCount = waits.filter((w) => !leaving.some((l) => l.id === memberWaitId(w))).length
+  useEffect(() => {
+    if (!holding || pendingCount > 0) return
+    const h = window.setTimeout(
+      () => setLeaving((ls) => ls.map((x) => (x.out ? x : { ...x, out: true }))),
+      MEMBER_RECEIPT_HOLD_MS
+    )
+    return () => window.clearTimeout(h)
+  }, [holding, pendingCount])
+
+  // 画的行 = 还在等的 + 正在离开的（插回原位）。
+  const leavingIds = new Set(leaving.map((l) => l.id))
+  const rows: { w: MemberWait; leave?: MemberAskLeaving }[] = waits
+    .filter((w) => !leavingIds.has(memberWaitId(w)))
+    .map((w) => ({ w }))
+  for (const l of [...leaving].sort((a, b) => a.index - b.index))
+    rows.splice(Math.min(l.index, rows.length), 0, { w: l.wait, leave: l })
+  if (!rows.length) return null
+  // 刚处理的那件不参与：下一件随它收起同时展开，不等主进程撤下它。
+  const openId = resolveOpen(waits.filter((w) => !leavingIds.has(memberWaitId(w))))
+
+  // 处理完一件：留回执，卡片收起，下一件自动展开。
+  const done = (w: MemberWait, index: number, key: string, ok: boolean): void => {
+    setLeaving((ls) => [
+      ...ls,
+      { seq: ++seq.current, id: memberWaitId(w), wait: w, index, text: fill(t(key), { name: w.name }), ok, out: false }
+    ])
+    setOpen(undefined)
+  }
+
   return (
-    <div className="cf-mwaits">
-      {waits.map(({ sid, name, persona, card, isNew, handoff }) => {
-        if (handoff)
-          // 网页上等你操作：点整行打开浏览器窗口、切到那个标签（窗口里有「完成，继续」「跳过」），不在这里展开。
+    // 几件排成一组：组内行距比消息列小（见 CSS .cf-masks）。
+    <div className="cf-masks">
+      {rows.map(({ w, leave }, index) => {
+        const id = memberWaitId(w)
+        const { sid, name, persona, isNew } = w
+        const instant = initialIds.has(id)
+        const face = isNew ? (
+          <span className="cf-mask__icon" aria-hidden="true">
+            <FolderOpen size={11} />
+          </span>
+        ) : (
+          <Avatar persona={persona} size={18} plain />
+        )
+        const receipt = leave?.text ? (
+          <span className={`cf-mask__pill is-done${leave.ok ? ' is-ok' : ''}`}>
+            <Check size={13} />
+            <span className="cf-mask__text">{leave.text}</span>
+          </span>
+        ) : null
+
+        if (w.handoff) {
+          // 网页上等你操作：点胶囊打开浏览器窗口、切到那个标签（窗口里有「完成，继续」「跳过」），不在这里展开。
+          const reason = BROWSER_WAIT_REASONS.has(w.handoff.reason) ? w.handoff.reason : 'other'
+          const tab = w.handoff.tab
           return (
-            <div key={`ho:${sid}`} className="cf-mwait">
+            <Fold key={id} className="cf-mask" open={!leave?.out} instant={instant}>
               <button
                 type="button"
-                className="cf-mwait__row"
-                onClick={() => void window.deva.browser.open({ tab: handoff.tab })}
+                className="cf-mask__pill"
+                title={w.handoff.message || undefined}
+                onClick={() => {
+                  if (!leave) void window.deva.browser.open({ tab })
+                }}
               >
-                <Avatar persona={persona} size={18} />
-                <span className="cf-mwait__text">
-                  {fill(t(`cf.member.waitBrowser.${BROWSER_WAIT_REASONS.has(handoff.reason) ? handoff.reason : 'other'}`), {
-                    name
-                  })}
-                </span>
-                {handoff.message && <span className="cf-mwait__sub">{handoff.message}</span>}
-                <span className="cf-mwait__act">{t('browser.goHandle')}</span>
+                {face}
+                <span className="cf-mask__text">{fill(t(`cf.member.waitBrowser.${reason}`), { name })}</span>
+                <span className="cf-mask__go">{t('browser.goHandle')}</span>
               </button>
-            </div>
+            </Fold>
           )
-        const isOpen = openKey === card.key
+        }
+
+        const card = w.card
+        const isOpen = !leave && openId === id
         const label =
           card.kind === 'ask'
             ? 'cf.member.waitAsk'
@@ -1303,58 +1517,74 @@ function MemberWaits({
               : isNew
                 ? 'cf.member.waitPick'
                 : 'cf.member.waitMount'
-        const action =
-          card.kind === 'ask'
-            ? 'cf.member.waitAnswer'
-            : card.kind === 'plan'
-              ? 'cf.member.waitReview'
-              : 'cf.member.waitHandle'
-        const preview =
-          card.kind === 'ask'
-            ? (card.questions[0]?.question ?? '')
-            : card.kind === 'plan'
-              ? (card.plan.split('\n').find((l) => l.trim()) ?? '').replace(/^#+\s*/, '')
-              : ''
+        // 只有展开着的那张接受操作；收起中 / 离开中的点了也不再提交。
+        const live = isOpen
+        // 选文件夹卡的说明：「不限」在新建成员时 = 不指定文件夹（不跟随主对话，之后可在成员对话里再选）；成员做到一半
+        // 来要时 = 成员改用完整路径。
+        const mountHint =
+          card.kind !== 'mount'
+            ? undefined
+            : isNew
+              ? t('cf.member.noLimitNone')
+              : fill(t('cf.member.noLimitPaths'), { name })
         return (
-          <div key={card.key} className={`cf-mwait${isOpen ? ' is-open' : ''}`}>
-            <button
-              type="button"
-              className="cf-mwait__row"
-              aria-expanded={isOpen}
-              onClick={() => setOpenKey(isOpen ? null : card.key)}
-            >
-              {isNew ? (
-                <span className="cf-mwait__icon" aria-hidden="true">
-                  <FolderOpen size={12} />
-                </span>
-              ) : (
-                <Avatar persona={persona} size={18} />
-              )}
-              <span className="cf-mwait__text">{fill(t(label), { name })}</span>
-              {preview && !isOpen && <span className="cf-mwait__sub">{preview}</span>}
-              <span className="cf-mwait__act">
-                {isOpen ? t('cf.member.waitCollapse') : t(action)}
-                <ChevronDown size={13} />
-              </span>
-            </button>
-            {isOpen && (
-              <div className="cf-mwait__card">
+          <Fold key={id} className="cf-mask" open={!leave?.out} instant={instant}>
+            {receipt ?? (
+              <button
+                type="button"
+                className={`cf-mask__pill${isOpen ? ' is-open' : ''}`}
+                aria-expanded={isOpen}
+                title={isOpen ? t('cf.member.waitFold') : undefined}
+                onClick={() => {
+                  if (!leave) setOpen(isOpen ? null : id)
+                }}
+              >
+                {face}
+                <span className="cf-mask__text">{fill(t(label), { name })}</span>
+                <ChevronDown size={13} className="cf-mask__chev" />
+              </button>
+            )}
+            {/* 卡片常驻（收起只是折叠），收起再展开时作答到一半的选择还在。 */}
+            <Fold className="cf-mask__fold" open={isOpen} instant={instant}>
+              <div className="cf-mask__card">
                 <BlockView
                   block={card}
                   thinkingDone
-                  onAsk={(k, a) => onAsk(k, a, sid)}
-                  onPlan={(k, d, f) => onPlan(k, d, f, sid)}
-                  onMountReq={(k, p) => onMountReq(k, p, sid)}
+                  bare
+                  hint={mountHint}
+                  extra={
+                    isNew ? undefined : (
+                      <button type="button" className="cf-mask__open" onClick={() => live && onOpenMember(sid)}>
+                        <MessageSquare size={12} />
+                        {t('cf.member.viewLog')}
+                      </button>
+                    )
+                  }
+                  onAsk={(k, a) => {
+                    if (!live) return
+                    onAsk(k, a, sid)
+                    const answered = a.some((x) => x.trim())
+                    done(w, index, answered ? 'cf.member.doneAsk' : 'cf.member.doneAskSkip', answered)
+                  }}
+                  onPlan={(k, d, f) => {
+                    if (!live) return
+                    onPlan(k, d, f, sid)
+                    done(
+                      w,
+                      index,
+                      d === 'approve' ? 'cf.member.doneApprove' : d === 'ignore' ? 'cf.member.doneIgnore' : 'cf.member.doneReply',
+                      d !== 'ignore'
+                    )
+                  }}
+                  onMountReq={(k, p) => {
+                    if (!live) return
+                    onMountReq(k, p, sid)
+                    done(w, index, p ? 'cf.member.donePick' : isNew ? 'cf.member.doneNoLimit' : 'cf.member.doneNoMount', !!p)
+                  }}
                 />
-                {!isNew && (
-                  <button type="button" className="cf-mwait__open" onClick={() => onOpenMember(sid)}>
-                    <MessageSquare size={12} />
-                    {t('cf.member.viewLog')}
-                  </button>
-                )}
               </div>
-            )}
-          </div>
+            </Fold>
+          </Fold>
         )
       })}
     </div>
@@ -1363,11 +1593,17 @@ function MemberWaits({
 
 /* ---------------- 绑定在本对话上的定时任务（对比稿 design/task-entry.html 方案 A + M2） ---------------- */
 
-/** 定时任务的「头像」：同管理面板任务行的图标（圆角方块里的日历钟），任务没有角色头像。 */
-function TaskFace({ size }: { size: number }): React.JSX.Element {
+/**
+ * 定时任务以自己的身份在对话里发言时的头像（对比稿 design/task-avatar-badge.html 方案 D）：任务所用角色的头像，
+ * 右下角压一枚方形角标——半透明遮罩托着绿色日历钟（同定时任务页里已完成任务的图标）。不挂悬停提示：名字旁边写着任务名。
+ */
+function TaskSpeakerFace({ persona, size }: { persona?: Persona; size: number }): React.JSX.Element {
   return (
-    <span className="cf-tface" style={{ width: size, height: size }} aria-hidden="true">
-      <CalendarClock size={Math.round(size * 0.52)} />
+    <span className="cf-taskface" style={{ '--sz': `${size}px` } as React.CSSProperties}>
+      <Avatar persona={persona} size={size} plain />
+      <span className="cf-taskface__badge" aria-hidden="true">
+        <CalendarClock size={13} strokeWidth={2.4} />
+      </span>
     </span>
   )
 }
@@ -1393,20 +1629,22 @@ function useShortTime(): (ms: number) => string {
 /**
  * 标题栏成员入口旁的定时任务入口（对比稿 design/task-entry.html 方案 A）：「闹钟 N」，同成员入口的写法，不放状态点。
  * 点开下拉：顶部「N 个定时任务」；每行同管理面板的任务行（状态色图标、任务名、第二行触发时间），右侧下次运行时间
- * （正在运行时是转圈 + 用时，暂停时写「已暂停」），悬停换成「立即运行」「暂停 / 继续」。点整行进入任务对话。
+ * （正在运行时是转圈 + 用时，暂停时写「已暂停」），悬停换成「立即运行」「暂停 / 继续」「删除」。点整行进入任务对话。
  */
 function TaskBar({
   tasks,
   sessionStates,
   onOpen,
   onRun,
-  onToggle
+  onToggle,
+  onDelete
 }: {
   tasks: TaskRecord[]
   sessionStates: Record<string, SessionLiveState>
   onOpen: (task: TaskRecord) => void
   onRun: (task: TaskRecord) => void
   onToggle: (task: TaskRecord) => void
+  onDelete: (task: TaskRecord) => void
 }): React.JSX.Element | null {
   const { t } = useI18n()
   const [at, setAt] = useState<number | null>(null)
@@ -1470,6 +1708,10 @@ function TaskBar({
               }}
               onRun={() => onRun(task)}
               onToggle={() => onToggle(task)}
+              onDelete={() => {
+                setAt(null)
+                onDelete(task)
+              }}
             />
           ))}
         </div>
@@ -1479,8 +1721,9 @@ function TaskBar({
 }
 
 /**
- * 闹钟列表里的一行（同管理面板的任务行：状态色图标、标题、第二行触发时间）：右侧下次运行时间（正在运行时是转圈 + 用时，
- * 暂停时写「已暂停」），悬停换成「立即运行」「暂停 / 继续」。点整行进入任务对话。
+ * 闹钟列表里的一行（同管理面板的任务行：状态色图标、标题、第二行触发时间）：不写下次运行时间，右侧只在暂停时写「已暂停」，
+ * 悬停换成「立即运行」「暂停 / 继续」「删除」（删除先弹确认框）。点整行进入任务对话。
+ * 正在运行时第二行的触发时间换成「转圈 + 已运行时长」（同成员列表第二行的工作中）。
  */
 function TaskBarRow({
   task,
@@ -1488,7 +1731,8 @@ function TaskBarRow({
   startedAt,
   onOpen,
   onRun,
-  onToggle
+  onToggle,
+  onDelete
 }: {
   task: TaskRecord
   busy: boolean
@@ -1496,23 +1740,11 @@ function TaskBarRow({
   onOpen: () => void
   onRun: () => void
   onToggle: () => void
+  onDelete: () => void
 }): React.JSX.Element {
   const { t } = useI18n()
-  const when = useShortTime()
   const desc = useSchedulePreview(task.schedule)
   const paused = task.status === 'paused' || task.status === 'error'
-  const next = busy ? (
-    <>
-      <Loader2 size={12} className="spin cf-members__now" />
-      {startedAt ? formatDuration(Math.max(0, Math.floor((Date.now() - startedAt) / 1000)), t) : t('cf.task.running')}
-    </>
-  ) : paused ? (
-    t('cf.task.paused')
-  ) : task.nextRunAt != null ? (
-    fill(t('cf.task.next'), { time: when(task.nextRunAt) })
-  ) : (
-    t('tasks.nextNever')
-  )
   return (
     <div className="cf-members__row">
       <button type="button" className="cf-members__open" onClick={onOpen}>
@@ -1524,12 +1756,25 @@ function TaskBarRow({
             <span className="cf-members__name">{task.title || t('chat.untitled')}</span>
           </span>
           <span className="cf-members__sub">
-            <Clock size={11} />
-            <span className="cf-members__text">{desc || task.schedule.cron || task.schedule.at || ''}</span>
+            {busy ? (
+              <>
+                <Loader2 size={11} className="spin cf-members__now" />
+                <span className="cf-members__time">
+                  {startedAt
+                    ? formatDuration(Math.max(0, Math.floor((Date.now() - startedAt) / 1000)), t)
+                    : t('cf.task.running')}
+                </span>
+              </>
+            ) : (
+              <>
+                <Clock size={11} />
+                <span className="cf-members__text">{desc || task.schedule.cron || task.schedule.at || ''}</span>
+              </>
+            )}
           </span>
         </span>
       </button>
-      <span className="cf-members__next">{next}</span>
+      {paused && <span className="cf-members__next">{t('cf.task.paused')}</span>}
       <span className="cf-members__acts">
         {!paused && (
           <button
@@ -1551,6 +1796,15 @@ function TaskBarRow({
           onClick={onToggle}
         >
           {paused ? <Play size={13} /> : <Pause size={13} />}
+        </button>
+        <button
+          type="button"
+          className="cf-members__ib is-danger"
+          title={t('cf.task.delete')}
+          aria-label={t('cf.task.delete')}
+          onClick={onDelete}
+        >
+          <Trash2 size={13} />
         </button>
       </span>
     </div>
@@ -1622,7 +1876,10 @@ function TaskLogHead({
   )
 }
 
-/** 定时任务交来要处理的结果（对比稿 M2）：居中一行灰底「闹钟 任务名 摘要」，点开是带任务名的全文框。 */
+/**
+ * 定时任务交来要处理的结果（对比稿 M2）：居中一行灰底「日历钟 任务名 摘要」，点开是带任务名的全文框。
+ * 图标用绿色日历钟（同任务发言头像的角标、定时任务页里已完成任务的图标）。
+ */
 function HandoffNotice({ handoff }: { handoff: HandoffInfo }): React.JSX.Element {
   const { t } = useI18n()
   const [open, setOpen] = useState(false)
@@ -1635,7 +1892,7 @@ function HandoffNotice({ handoff }: { handoff: HandoffInfo }): React.JSX.Element
         title={t(open ? 'cf.task.collapse' : 'cf.task.expand')}
         onClick={() => setOpen((v) => !v)}
       >
-        <TaskFace size={18} />
+        <CalendarClock size={15} className="cf-handoff__ic" aria-hidden="true" />
         <span className="cf-handoff__text">
           <b>{handoff.title}</b> {handoff.summary}
         </span>
@@ -1644,7 +1901,7 @@ function HandoffNotice({ handoff }: { handoff: HandoffInfo }): React.JSX.Element
       {open && (
         <div className="cf-handoff__box">
           <div className="cf-handoff__who">
-            <TaskFace size={16} />
+            <CalendarClock size={14} className="cf-handoff__ic" aria-hidden="true" />
             {handoff.title}
           </div>
           <Markdown text={handoff.content} />
@@ -1654,7 +1911,10 @@ function HandoffNotice({ handoff }: { handoff: HandoffInfo }): React.JSX.Element
   )
 }
 
-/** 成员对话的标题栏：「← 主角色」返回主对话，后面是成员头像、名字与状态（文件夹在输入框的 chip 上）。 */
+/**
+ * 成员对话的标题栏：「← 主角色」返回主对话，后面是成员头像与名字（文件夹在输入框的 chip 上）。
+ * 工作中不加「工作中」标签：头像的扫光已经表示在工作（同成员列表，见 MemberBar）。
+ */
 function MemberLogHead({
   view,
   streaming
@@ -1682,13 +1942,6 @@ function MemberLogHead({
       <span className="cf-conv__mname" title={meta.duty || undefined}>
         {meta.name}
       </span>
-      {/* 只在工作中显示状态胶囊（与成员卡片同一套 .cf-mcard__pill：主题色底 + 闪烁圆点）；空闲时不显示。 */}
-      {streaming && (
-        <span className="cf-mcard__pill is-busy">
-          <i aria-hidden="true" />
-          {t('cf.member.working')}
-        </span>
-      )}
     </>
   )
 }
@@ -2083,16 +2336,21 @@ function Rail({
     onReorderPersonas([id, ...ids.filter((x) => x !== id)])
   }
   // 对话行（对话列表与已归档对话共用）：右键菜单记下是否已归档，菜单项随之不同。
-  const threadRow = (s: SessionMeta): React.JSX.Element => (
+  const threadRow = (s: SessionMeta): React.JSX.Element => {
+    const owner = personas.find((p) => p.id === s.personaId)
+    // 成员的显示身份与是否在工作，一一对应（认不出身份的成员两边一起去掉）。
+    const members = (s.members ?? [])
+      .filter((m) => !m.removed)
+      .map((m) => ({ persona: memberPersona(m, personas, owner), working: !!sessionStates[m.sessionId]?.streaming }))
+      .filter((x): x is { persona: Persona; working: boolean } => !!x.persona)
+    return (
     <ThreadRow
       key={s.id}
       session={s}
-      owner={personas.find((p) => p.id === s.personaId)}
-      memberFaces={(s.members ?? [])
-        .filter((m) => !m.removed)
-        .map((m) => memberPersona(m, personas, personas.find((p) => p.id === s.personaId)))
-        .filter((p): p is Persona => !!p)}
+      owner={owner}
+      memberFaces={members.map((x) => x.persona)}
       state={sessionStates[s.id]}
+      membersWorking={members.map((x) => x.working)}
       browserPages={browserPages[s.id] ?? 0}
       tasks={tasksBySession[s.id] ?? []}
       active={s.id === currentSessionId}
@@ -2109,7 +2367,8 @@ function Rail({
         })
       }}
     />
-  )
+    )
+  }
   return (
     <aside
       ref={asideRef}
@@ -3468,7 +3727,8 @@ function AddMenu({
  * 写 +N 的第 4 枚自然在最上面；人物脸朝左，被压住的多是右侧头发与下方肩膀，脸仍露着。
  * 主角色排第一位（左 / 上 / 左上）；头像一律框内构图，压处的分隔环取行底色。
  * 两人时头像放大到 28px，左右各越出头像列 3px（落在行内边距与文字间距里，不挤文字）。
- * 生成中的扫光只扫主角色那一枚，待处理 / 未读红点在方框右上角。
+ * 生成中谁在工作谁变星芒（对比稿 design/group-busy-burst.html 方案 A）：主角色在回复就是主角色那枚，成员在工作就是
+ * 那位成员；写 +N 的第 4 枚代表它自己和没露脸的人，其中任何一位在工作它就变。待处理 / 未读红点在方框右上角。
  */
 const GROUP_LAYOUT: Record<1 | 2 | 3 | 4, { size: number; ring: boolean; at: [number, number][] }> = {
   // 只剩一位（主角色不存在、只有一个成员）：照单人头像画满
@@ -3480,12 +3740,13 @@ const GROUP_LAYOUT: Record<1 | 2 | 3 | 4, { size: number; ring: boolean; at: [nu
 }
 function GroupFace({
   people,
-  busy,
+  working,
   dot,
   title
 }: {
   people: Persona[]
-  busy?: boolean
+  /** 与 people 一一对应：这一位是否在工作（主角色在回复 / 成员在干活）。 */
+  working?: boolean[]
   dot?: boolean
   title?: string
 }): React.JSX.Element {
@@ -3495,23 +3756,24 @@ function GroupFace({
   return (
     <span className={`cf-group${layout.ring ? ' is-overlap' : ''}`} title={title}>
       {shown.map((p, i) => {
-        const spec = parseAvatarSpec(p.avatar)
         const [x, y] = layout.at[i]
+        const veiled = more > 0 && i === 3
+        const busy = veiled ? !!working?.slice(3).some(Boolean) : !!working?.[i]
         return (
           <span
             key={`${i}:${p.id}`}
             className="cf-group__face"
             style={{ left: x, top: y, width: layout.size, height: layout.size }}
           >
-            <PersonaFace seed={p.id} spec={spec} image={p.avatarImage} compact />
-            {busy && i === 0 && (
-              <span className="cf-ava__sweep" aria-hidden="true" style={{ mask: shapeMask(resolveShape(p.id, spec)) }} />
-            )}
-            {more > 0 && i === 3 && (
-              <span className="cf-group__more" style={{ mask: shapeMask(resolveShape(p.id, spec)) }}>
-                +{more}
-              </span>
-            )}
+            <PersonaFace
+              seed={p.id}
+              spec={parseAvatarSpec(p.avatar)}
+              image={p.avatarImage}
+              compact
+              busy={busy}
+              veil={veiled}
+            />
+            {veiled && <span className="cf-group__more">+{more}</span>}
           </span>
         )
       })}
@@ -3525,6 +3787,7 @@ function ThreadRow({
   owner,
   memberFaces,
   state,
+  membersWorking,
   browserPages,
   tasks,
   active,
@@ -3536,6 +3799,8 @@ function ThreadRow({
   /** 成员的显示身份（未移除的，按加入先后）：有成员时头像换成群组头像（GroupFace）。 */
   memberFaces: Persona[]
   state?: SessionLiveState
+  /** 与 memberFaces 一一对应：这位成员是否正在工作（群组头像里谁在工作谁变星芒）。定时任务不算。 */
+  membersWorking: boolean[]
   /** 这个对话在内置浏览器里开着几个网页（>0 时标题旁打地球徽标）。 */
   browserPages: number
   /** 绑定在这个对话上的定时任务（>0 时打闹钟徽标，悬停列出任务名）。 */
@@ -3558,13 +3823,13 @@ function ThreadRow({
       onClick={onClick}
       onContextMenu={onContext}
     >
-      {/* 对话中（streaming）→ 头像上一道扫光指示；有新消息 / 待你处理 → 右上角红点。
+      {/* 对话中（streaming）→ 头像底板变成星芒并转动；有新消息 / 待你处理 → 右上角红点。
           正在查看的对话不打红点（内容就在眼前），已归档的也不打（归档即不再提醒）。 */}
       <span className="cf-thread__face">
         {memberFaces.length > 0 ? (
           <GroupFace
             people={owner ? [owner, ...memberFaces] : memberFaces}
-            busy={state?.streaming}
+            working={owner ? [!!state?.streaming, ...membersWorking] : membersWorking}
             dot={!active && !session.archived && (state?.attention || state?.unread)}
             title={fill(t('cf.member.threadBadge'), {
               n: String(members.length),
@@ -3803,23 +4068,29 @@ function fmtAbs(ts: number, locale: 'zh-CN' | 'en'): string {
 function TasksPane({
   target,
   onTargetConsumed,
-  onAddByChat
+  onAddByChat,
+  onOpenChat
 }: {
   /** 外部导航意图（对话里「查看任务」）：非空则挂载即选中该任务；消费后经 onTargetConsumed 回清。 */
   target: string | null
   onTargetConsumed: () => void
   /** 「通过对话添加」：新建对话 + 预填引导语（实现于外壳，同「通过对话添加角色」）。 */
   onAddByChat: () => void
+  /** 打开某对话并切到对话页（运行历史的「查看对话」打开任务对话）。 */
+  onOpenChat: (sessionId: string) => void
 }): React.JSX.Element {
   const { t, locale } = useI18n()
   const { tasks, create, setStatus, runNow, update, remove } = useTasks()
-  // 详情「结果」行里的对话名：绑定任务完成后通知的那个对话。
+  // 详情「运行方式」行里的会话名（在会话中运行的任务）。
   const { sessions: chatSessions } = useChat()
   const chatTitle = (task: TaskRecord): string | null => {
     if (!task.ownerSessionId) return null
     const s = chatSessions.find((x) => x.id === task.ownerSessionId)
     return s ? s.title || t('chat.untitled') : null
   }
+  // 任务对话在不在（运行历史标题右侧的「查看对话」，对比稿 design/task-run-view.html 方案 A）：对话要到第一次运行才建，
+  // 被用户删了则下次运行重建；不在时什么都不显示（用户定：不显示「对话已删除」）。
+  const hasChat = (task: TaskRecord): boolean => chatSessions.some((x) => x.id === task.sessionId)
   const { providers } = useModels()
   const { personas } = useExtensions()
   const dialog = useDialog()
@@ -3955,6 +4226,7 @@ function TasksPane({
           onRunNow={() => doRunNow(viewTask)}
           onDelete={() => doDelete(viewTask)}
           chatTitle={chatTitle(viewTask)}
+          onOpenChat={hasChat(viewTask) ? () => onOpenChat(viewTask.sessionId) : null}
         />
       ) : (
         <TasksEmpty hasTasks={tasks.length > 0} />
@@ -3963,8 +4235,8 @@ function TasksPane({
         <TaskFormModal
           task={null}
           onClose={() => setCreating(false)}
-          onSubmit={async (input) => {
-            const res = await create(input)
+          onSubmit={async ({ ownerSessionId, ...input }) => {
+            const res = await create({ ...input, ...(ownerSessionId ? { ownerSessionId } : {}) })
             // 失败：回错误 key 给表单就地提示（不关弹窗）；成功：关表单并直选新任务（列表由广播刷新）。
             if (!res.ok) return taskErrorKey(res.error)
             setCreating(false)
@@ -4253,7 +4525,8 @@ function TaskDetail({
   onSetStatus,
   onRunNow,
   onDelete,
-  chatTitle
+  chatTitle,
+  onOpenChat
 }: {
   task: TaskRecord
   personaName: string
@@ -4264,6 +4537,8 @@ function TaskDetail({
   onDelete: () => void
   /** 完成后通知的那个对话的标题（绑定任务才有）。 */
   chatTitle: string | null
+  /** 打开任务对话（停在最新一轮，即最近一次运行）；任务对话不在（还没运行过 / 被删了）为 null，不显示入口。 */
+  onOpenChat: (() => void) | null
 }): React.JSX.Element {
   const { t, locale } = useI18n()
   const rel = useRelativeTime()
@@ -4341,16 +4616,15 @@ function TaskDetail({
               <span className="cf-profile__k">{t('tasks.fModel')}</span>
               <span className="cf-profile__v">{modelLabel}</span>
             </div>
-            {/* 绑定对话的任务多一行「通知对话 对话名」，样式同上面各行；独立运行的没有这一行（顶部铃铛 / 日历钟
-                已经区分了两种任务）。这里不切换绑定，开关只在创建后的名片上。 */}
-            {chatTitle && (
-              <div className="cf-profile__row">
-                <span className="cf-profile__k">{t('tasks.fNotifyChat')}</span>
-                <span className="cf-profile__v cf-tdetail__chat" title={chatTitle}>
-                  {chatTitle}
-                </span>
-              </div>
-            )}
+            {/* 运行方式：独立运行，或在某个会话中运行（在「编辑」里改） */}
+            <div className="cf-profile__row">
+              <span className="cf-profile__k">{t('tasks.fRunMode')}</span>
+              <span className="cf-profile__v cf-tdetail__chat" title={chatTitle ?? undefined}>
+                {chatTitle
+                  ? fill(t('tasks.runInChatNamed'), { name: clipChatTitle(chatTitle, RUN_CHAT_TITLE_DETAIL) })
+                  : t('tasks.runAlone')}
+              </span>
+            </div>
           </div>
 
           <div className="cf-tdetail__actions">
@@ -4377,7 +4651,17 @@ function TaskDetail({
           </div>
 
           <div className="cf-tdetail__section">
-            <div className="cf-profile__convs-label">{t('tasks.runHistory')}</div>
+            {/* 标题右侧：一个任务只有一个对话，每次运行在里面追加一轮，所以只放一个入口，不逐行放。 */}
+            <div className="cf-tdetail__sechead">
+              <div className="cf-profile__convs-label">{t('tasks.runHistory')}</div>
+              {onOpenChat && (
+                <button type="button" className="cf-tdetail__chatlink" onClick={onOpenChat}>
+                  <MessageCircle size={13} />
+                  {t('tasks.viewChat')}
+                  <ChevronRight size={13} />
+                </button>
+              )}
+            </div>
             {history.length === 0 ? (
               <div className="cf-empty">{t('tasks.historyEmpty')}</div>
             ) : (
@@ -4413,6 +4697,26 @@ function TaskDetail({
 }
 
 /**
+ * 会话头像（同左侧对话列表）：有成员时是群组头像（GroupFace 按 38px 排好，整体缩到 size），否则是会话角色的头像。
+ * 用在定时任务「运行方式」的会话列表里。
+ */
+function SessionFace({ session, size }: { session: SessionMeta; size: number }): React.JSX.Element {
+  const { personas } = useExtensions()
+  const owner = personas.find((p) => p.id === session.personaId)
+  const members = (session.members ?? [])
+    .filter((m) => !m.removed)
+    .map((m) => memberPersona(m, personas, owner))
+    .filter((p): p is Persona => !!p)
+  if (members.length)
+    return (
+      <span className="cf-sessface" style={{ zoom: size / 38 }}>
+        <GroupFace people={owner ? [owner, ...members] : members} />
+      </span>
+    )
+  return <Avatar persona={owner} size={size} plain />
+}
+
+/**
  * 任务表单弹窗（复用 .cf-modal is-editor 编辑器骨架）——**新建 / 编辑共用一套表单**：标题/指令/日程/人格/模型。
  * 与创建确认名片同构：日程 cron 反解/拼装走共享 ../features/chat/schedule，实时 preview 校验并给人读摘要；
  * 落盘走 tasks.create / tasks.update（主进程校验日程、算首次或重算下次触发、完成/错误态改日程即重激活），
@@ -4421,11 +4725,14 @@ function TaskDetail({
  */
 function TaskFormModal({
   task,
+  hideRunMode,
   onClose,
   onSubmit
 }: {
   /** 既有任务 → 编辑态；null → 手动新建（空表单 + 每天 10:00 默认日程）。 */
   task: TaskRecord | null
+  /** 不显示运行方式（从任务对话标题栏打开时：改到别的对话会让「返回」回到那个对话）。提交时运行方式保持原样。 */
+  hideRunMode?: boolean
   onClose: () => void
   /** 提交：成功返回 null（由调用方关闭弹窗），失败返回错误文案 key（就地提示，不关弹窗）。 */
   onSubmit: (input: {
@@ -4433,6 +4740,8 @@ function TaskFormModal({
     prompt: string
     schedule: TaskSchedule
     auth: { personaId: string | null; modelRef: string | null }
+    /** 运行方式：会话 id = 在该会话中运行，null = 独立运行。 */
+    ownerSessionId: string | null
   }) => Promise<string | null>
 }): React.JSX.Element {
   const { t, locale } = useI18n()
@@ -4444,6 +4753,8 @@ function TaskFormModal({
   // 新建默认：人格 null → TaskPersonaSelect 自动落到首个已启用角色；模型 null → 全局默认。
   const [personaId, setPersonaId] = useState<string | null>(task?.auth.personaId ?? null)
   const [modelRef, setModelRef] = useState<string | null>(task?.auth.modelRef ?? null)
+  // 运行方式：默认独立运行；在会话中运行 = 结果交给那个会话（见 TaskRunModeSelect）。
+  const [ownerId, setOwnerId] = useState<string | null>(task?.ownerSessionId ?? null)
 
   const [saving, setSaving] = useState(false)
   // 提交失败的错误文案 key（主进程稳定错误码 → 本地化）；再次提交前清空。
@@ -4504,7 +4815,8 @@ function TaskFormModal({
         title: title.trim(),
         prompt: prompt.trim(),
         schedule,
-        auth: { personaId, modelRef }
+        auth: { personaId, modelRef },
+        ownerSessionId: ownerId
       })
       // 成功（null）→ 由调用方关闭弹窗；失败 → 就地提示，表单保持可改。
       if (failed) setErr(failed)
@@ -4559,7 +4871,7 @@ function TaskFormModal({
             </div>
           </div>
 
-          {/* 任务指令：与对话输入框同款内嵌盒（更高、不可拖），底部工具条内嵌人格 / 模型 chip 选择器。 */}
+          {/* 任务指令：与对话输入框同款内嵌盒（更高、不可拖），底部工具条内嵌运行方式 / 人格 / 模型 chip 选择器。 */}
           <div className="cf-field">
             <label className="cf-field__label">{t('tasks.fPrompt')}</label>
             <div className="cf-box cf-box--task">
@@ -4569,6 +4881,14 @@ function TaskFormModal({
                 onChange={(e) => setPrompt(e.target.value)}
               />
               <div className="cf-box__bar">
+                {!hideRunMode && (
+                  <TaskRunModeSelect
+                    value={ownerId}
+                    taskSessionId={task?.sessionId}
+                    faceOf={(s, size) => <SessionFace session={s} size={size} />}
+                    onChange={setOwnerId}
+                  />
+                )}
                 <TaskPersonaSelect value={personaId} onChange={setPersonaId} />
                 <TaskModelSelect value={modelRef} onChange={setModelRef} />
               </div>
@@ -4664,9 +4984,11 @@ function Conversation({
   onRemoveMember,
   pendingCards,
   boundTasks,
+  taskPersonaOf,
   onOpenTask,
   onRunTask,
   onToggleTask,
+  onDeleteTask,
   onEditTask,
   taskView,
   memberView
@@ -4715,15 +5037,19 @@ function Conversation({
   /** 打开某个成员的对话（在当前对话区切换到它的成员会话）。 */
   onOpenMember: (memberSessionId: string) => void
   onRemoveMember: (m: MemberMeta) => void
-  /** 各会话正等用户处理的交互卡：成员的在输入框上方显示为通知行（见 MemberWaits）。 */
+  /** 各会话正等用户处理的交互卡：成员的在主对话末尾显示为胶囊 + 卡片（见 MemberAsks）。 */
   pendingCards: Record<string, PendingCard[]>
   /** 绑定在本对话上的定时任务：标题栏成员入口旁的闹钟入口（见 TaskBar）。 */
   boundTasks: TaskRecord[]
+  /** 定时任务以自己的身份发言时，按任务名找它所用的角色（头像用，见 TaskSpeakerFace）。 */
+  taskPersonaOf: (title: string) => Persona | undefined
   /** 打开某个任务的任务对话（整页切换，同成员对话）。 */
   onOpenTask: (task: TaskRecord) => void
   onRunTask: (task: TaskRecord) => void
   /** 暂停 / 继续。 */
   onToggleTask: (task: TaskRecord) => void
+  /** 删除定时任务（先弹确认框）。 */
+  onDeleteTask: (task: TaskRecord) => void
   onEditTask: (task: TaskRecord) => void
   /** 正在看的任务对话：标题栏换成「← 主角色 | 闹钟 任务名 · 日程 · 下次」+ 立即运行 / 暂停 / 编辑。owner 是主对话的角色。 */
   taskView?: {
@@ -4748,9 +5074,20 @@ function Conversation({
 }): React.JSX.Element {
   const { t, locale } = useI18n()
   const scrollRef = useRef<HTMLDivElement>(null)
-  // 成员在内置浏览器里等你操作（登录、验证等）：同提问 / 计划，在输入框上方的通知行里提醒（见 MemberWaits）。
+  // 成员在内置浏览器里等你操作（登录、验证等）：同提问 / 计划，在对话末尾放一枚胶囊提醒（见 MemberAsks）。
   const browserState = useBrowserState()
+  // 在本对话中运行的定时任务名（小写）：主角色的 member_send / member_status 也能点到它们（见 blocks.tsx TaskNamesContext）。
+  // 与成员同名的让给成员（主进程同样先找成员）。
+  const taskNames = useMemo(() => {
+    const memberNames = new Set([...members, ...formerMembers].map((m) => m.meta.name.toLowerCase()))
+    return new Set(boundTasks.map((x) => x.title.trim().toLowerCase()).filter((n) => n && !memberNames.has(n)))
+  }, [boundTasks, members, formerMembers])
+  const taskNameCtx = useMemo(
+    () => ({ has: (name: string) => taskNames.has(name.trim().toLowerCase()), only: taskNames.size > 0 && !members.length }),
+    [taskNames, members]
+  )
   // 执行步骤里成员名前的小头像（派任务、建成员等，见 blocks.tsx MemberFaceContext）：按名字在主对话名单里找，含已移除的。
+  // 定时任务名前不放图标。
   const memberFace = useCallback(
     (name: string): React.ReactNode => {
       const key = name.trim().toLowerCase()
@@ -5051,6 +5388,9 @@ function Conversation({
   // - 非流式且有内容 → 提供「选择删除」（流式/改写中删除会撞上正在变的 messages，故此时不给）。
   // 选择态下让位给选择态自身交互；既无选中又不可删则不接管右键（放行系统默认菜单）。
   const onMsgsContextMenu = (e: React.MouseEvent): void => {
+    // 只认真正点在对话区里的右键：挂到 body 的浮层（卡片里下拉框的选项列表等）在 React 树里仍是对话区的子孙，
+    // 右键会冒泡上来误弹对话菜单。
+    if (!e.currentTarget.contains(e.target as Node)) return
     if (selecting) return
     const selection = (window.getSelection()?.toString() ?? '').trim()
     const canDelete = !streaming && messages.length > 0
@@ -5192,7 +5532,7 @@ function Conversation({
 
   // 单条消息渲染（选择态与常态复用；选择态下 active 恒 false，因选择只在非流式时可用）。
   // turn：常态渲染传入，标注到根 data-turn 供右键定位；选择态用卡片自身处理点击，无需传。
-  // 主对话里等你处理的「为成员选择文件夹」卡在输入框上方的通知行里处理（见 MemberWaits），消息流里先不画；处理完照常是一步。
+  // 主对话里等你处理的「为成员选择文件夹」卡在对话末尾的胶囊下处理（见 MemberAsks），消息流里先不画；处理完照常是一步。
   const hidePendingPick = (m: ChatMessage): ChatMessage =>
     !memberView && m.role === 'assistant' && m.blocks.some((b) => b.kind === 'mount' && b.member && !b.decided)
       ? { ...m, blocks: m.blocks.filter((b) => !(b.kind === 'mount' && b.member && !b.decided)) }
@@ -5220,7 +5560,7 @@ function Conversation({
   const renderMsg = (m: ChatMessage, i: number, turn?: number): React.JSX.Element => {
     const report = reportOf(i)
     // 成员交差：以该成员的身份画（头像 + 名字 + 结论原文）；认不出是哪位成员时退回带标题行的写法。
-    // 定时任务告知的：以任务的身份画（闹钟头像 + 任务名）。
+    // 定时任务告知的：以任务的身份画（任务所用角色的头像 + 定时任务角标 + 任务名）。
     const speaker = report?.persona
     return (
       <ConvMessage
@@ -5229,6 +5569,7 @@ function Conversation({
         report={report && !speaker && !report.task ? report : undefined}
         owner={speaker ?? owner}
         taskSpeaker={report?.task}
+        taskPersona={report?.task ? taskPersonaOf(report.task) : undefined}
         taskOwner={memberView?.owner}
         active={!selecting && streaming && i === messages.length - 1}
         latest={i === messages.length - 1}
@@ -5246,7 +5587,7 @@ function Conversation({
   }
 
   // 成员正等你处理的卡（只在主对话里显示；成员对话里卡片就在它自己的对话流中）。
-  // 主对话里另有主角色建成员时「为成员选择文件夹」的卡（create_member 的 pick_folder）：同样放在这里，不进消息流。
+  // 主对话里另有主角色建成员时「为成员选择文件夹」的卡（create_member 的 pick_folder）：同样放在对话末尾，不进消息流。
   const waits: MemberWait[] = memberView
     ? []
     : [
@@ -5303,6 +5644,7 @@ function Conversation({
               onOpen={onOpenTask}
               onRun={onRunTask}
               onToggle={onToggleTask}
+              onDelete={onDeleteTask}
             />
           </>
         )}
@@ -5383,6 +5725,17 @@ function Conversation({
                 {/* 等主角色汇总的成员进度（不进对话记录，全部交差时消失）。 */}
                 {isTail && !memberView && (
                   <MemberProgressNotice ownerName={owner?.name ?? 'Deva'} faceOf={memberPersonaOf} />
+                )}
+                {/* 成员在等你处理（不进对话记录，处理完消失）。按会话重挂载，展开与回执不串到别的对话。 */}
+                {isTail && !memberView && (
+                  <MemberAsks
+                    key={currentSessionId}
+                    waits={waits}
+                    onAsk={onAsk}
+                    onPlan={onPlan}
+                    onMountReq={onMountReq}
+                    onOpenMember={onOpenMember}
+                  />
                 )}
                 {/* 已有对话但模型被删光：引导卡接在末尾（不进对话记录）。 */}
                 {isTail && needModelSetup && !streaming && <ModelSetupCard />}
@@ -5465,9 +5818,8 @@ function Conversation({
           sessionId={currentSessionId}
           owner={owner}
           mentionables={mentionables}
-          // 成员对话：技能按成员的设定来源角色过滤；文件夹「不限」时显示的是主对话的工作目录（跟随它），不给 ✕。
+          // 成员对话：技能按成员的设定来源角色过滤。
           roleId={memberView?.entry.meta.personaId}
-          canUnmount={memberView ? !!memberView.entry.meta.root : true}
           streaming={streaming}
           focusRoot={focusRoot}
           onMount={onMount}
@@ -5479,17 +5831,6 @@ function Conversation({
           onSide={onSide}
           prefill={prefill}
           onPrefillConsumed={onPrefillConsumed}
-          above={
-            waits.length ? (
-              <MemberWaits
-                waits={waits}
-                onAsk={onAsk}
-                onPlan={onPlan}
-                onMountReq={onMountReq}
-                onOpenMember={onOpenMember}
-              />
-            ) : undefined
-          }
         />
       )}
 
@@ -5510,7 +5851,9 @@ function Conversation({
   // 执行步骤里成员名前的小头像（见 blocks.tsx MemberFaceContext）；成员对话里没有成员工具，不提供。
   return (
     <MemberFaceContext.Provider value={memberView ? null : memberFace}>
-      <MentionContext.Provider value={mentionLookup}>{view}</MentionContext.Provider>
+      <TaskNamesContext.Provider value={memberView ? null : taskNameCtx}>
+        <MentionContext.Provider value={mentionLookup}>{view}</MentionContext.Provider>
+      </TaskNamesContext.Provider>
     </MemberFaceContext.Provider>
   )
 }
@@ -5741,6 +6084,7 @@ function ConvMessage({
   report,
   owner,
   taskSpeaker,
+  taskPersona,
   taskOwner,
   active,
   latest,
@@ -5758,8 +6102,10 @@ function ConvMessage({
   /** 成员交差的回复：标题行（「前端已完成：任务」）单独画、前面带成员的小头像（msg 里已去掉这一行）。 */
   report?: MemberReportHead
   owner?: Persona
-  /** 绑定的定时任务告知的那条：以任务的身份画（闹钟头像 + 任务名），不用 owner。 */
+  /** 绑定的定时任务告知的那条：以任务的身份画（taskPersona 的头像 + 定时任务角标 + 任务名），不用 owner。 */
   taskSpeaker?: string
+  /** 定时任务所用的角色（见 TaskSpeakerFace）。 */
+  taskPersona?: Persona
   /** 成员对话里派任务的主对话角色：主智能体派来的任务画成它说的话。 */
   taskOwner?: Persona
   active: boolean
@@ -5993,7 +6339,7 @@ function ConvMessage({
   const name = <span className="cf-msg__name">{taskSpeaker ?? owner?.name ?? t('cf.assistant')}</span>
   return (
     <div className="cf-msg" data-turn={dataTurn}>
-      {taskSpeaker ? <TaskFace size={32} /> : <Avatar persona={owner} size={32} />}
+      {taskSpeaker ? <TaskSpeakerFace persona={taskPersona} size={32} /> : <Avatar persona={owner} size={32} />}
       <div className="cf-msg__body">
         {!split && <div className="cf-msg__head">{name}</div>}
         <div
@@ -6046,7 +6392,7 @@ interface SlashCommand {
   name: string
   desc: string
   /**
-   * mention = 「@ 成员 / 角色」联想（输入以 @ 开头时），采纳后写回 `@name `；
+   * mention = 「@ 成员 / 角色」联想（光标处的词以 @ 开头时），采纳后写回 `@name `；
    * newMember = 「新建成员」，采纳后写回 `@新建成员 `（name 即此标记，见 shared/mention.ts），接着写需求。
    */
   kind: 'command' | 'skill' | 'mention' | 'newMember'
@@ -6056,21 +6402,6 @@ interface SlashCommand {
   member?: boolean
   /** 浮层里显示的名字（缺省按 kind 写成 `@name` / `/name`）。 */
   label?: string
-}
-
-/**
- * 取「/ 指令」联想的查询词：仅当输入**直接以 / 开头**且其后尚无空白（仍在敲指令名本身）时生效。
- * 返回 '' 表示刚敲下 `/`（列全部）；返回 null 表示不该联想（正文中间的 /、已带参数的指令、多行输入）。
- */
-function slashQueryOf(input: string): string | null {
-  const m = /^\/([A-Za-z0-9_-]*)$/.exec(input)
-  return m ? m[1] : null
-}
-
-/** 取「@ 成员」联想的查询词：同 slashQueryOf，仅当输入直接以 @ 开头、其后尚无空白时生效。 */
-function mentionQueryOf(input: string): string | null {
-  const m = /^@([^\s@]*)$/.exec(input)
-  return m ? m[1] : null
 }
 
 /**
@@ -6214,7 +6545,6 @@ function Composer({
   owner,
   mentionables,
   roleId,
-  canUnmount = true,
   streaming,
   focusRoot,
   onMount,
@@ -6225,8 +6555,7 @@ function Composer({
   onRewind,
   onSide,
   prefill,
-  onPrefillConsumed,
-  above
+  onPrefillConsumed
 }: {
   /** 当前会话：输入框里的草稿按它分开保存（见 composerDrafts）。 */
   sessionId: string
@@ -6235,8 +6564,6 @@ function Composer({
   mentionables: SlashCommand[]
   /** 技能按哪个角色过滤（缺省 = owner）：成员对话里是成员的设定来源角色。 */
   roleId?: string
-  /** 文件夹 chip 上给不给 ✕（成员文件夹为「不限」时显示的是主对话的目录，卸载无意义）。 */
-  canUnmount?: boolean
   streaming: boolean
   focusRoot: string | null
   onMount: (path: string | null) => void
@@ -6250,8 +6577,6 @@ function Composer({
   onSide: (selection?: string) => void
   prefill: { text: string; nonce: number } | null
   onPrefillConsumed: () => void
-  /** 胶囊排之上、与输入盒同宽的一块（主对话里成员在等你处理的通知行，见 MemberWaits）。 */
-  above?: React.ReactNode
 }): React.JSX.Element {
   const { t, locale } = useI18n()
   const { skills: allSkills } = useExtensions()
@@ -6280,6 +6605,8 @@ function Composer({
   const [slashSel, setSlashSel] = useState(0)
   /** Esc 收起联想；任何一次输入改动都会复位，重新键入即可再唤出。 */
   const [slashOff, setSlashOff] = useState(false)
+  /** 光标处以 / 或 @ 开头的词（开头或正文中间都算，见 composer-editor 的 ComposerTrigger）：据此弹出联想。 */
+  const [trigger, setTrigger] = useState<ComposerTrigger | null>(null)
   /** 输入框是否持有焦点：失焦即收起联想（采纳项走 mousedown+preventDefault，不会触发失焦）。 */
   const [focused, setFocused] = useState(false)
   const slashRef = useRef<HTMLDivElement>(null)
@@ -6314,14 +6641,17 @@ function Composer({
     return out
   }, [skills, t])
 
-  const slashQuery = slashQueryOf(input)
-  // 「@」联想与「/」共用同一个浮层：输入以 @ 开头时候选换成成员与角色。
-  const mentionQuery = slashQuery === null && mentionables.length > 0 ? mentionQueryOf(input) : null
+  // 光标处正在敲的 `/词`、`@词`（开头或正文中间都可以）：「@」联想与「/」共用同一个浮层，@ 时候选换成成员与角色。
+  const slashQuery = trigger?.char === '/' ? trigger.query : null
+  const mentionQuery = trigger?.char === '@' && mentionables.length > 0 ? trigger.query : null
   const suggestQuery = slashQuery ?? mentionQuery
+  // /compact、/rewind 只在输入框里只有这一个词时可选（同 submit 的拦截）；其余情况只列技能。
+  const slashAlone = !!trigger?.alone
   // 排序：前缀命中优先于子串命中，组内保持原序（/compact 在前，技能按扩展页顺序）。
   const slashMatches = useMemo<SlashCommand[]>(() => {
     if (suggestQuery === null) return []
-    const pool = slashQuery !== null ? slashCommands : mentionables
+    const pool =
+      slashQuery === null ? mentionables : slashAlone ? slashCommands : slashCommands.filter((c) => c.kind === 'skill')
     const q = suggestQuery.toLowerCase()
     if (!q) return pool
     const head: SlashCommand[] = []
@@ -6332,7 +6662,7 @@ function Composer({
       else if (n.includes(q)) tail.push(c)
     }
     return [...head, ...tail]
-  }, [slashCommands, mentionables, slashQuery, suggestQuery])
+  }, [slashCommands, mentionables, slashQuery, suggestQuery, slashAlone])
   const slashOpen = focused && suggestQuery !== null && slashMatches.length > 0 && !slashOff
   // 高亮下标就地夹紧：命中集随输入收缩时，无需等 effect 落地即为合法值。
   const slashCur = slashOpen ? Math.min(slashSel, slashMatches.length - 1) : -1
@@ -6341,6 +6671,10 @@ function Composer({
   useEffect(() => {
     setSlashSel(0)
   }, [suggestQuery])
+  // 光标移到了另一个 / @ 词上（没打字）：Esc 收起的联想也重新可唤出。
+  useEffect(() => {
+    setSlashOff(false)
+  }, [trigger?.start, trigger?.char])
 
   // 键盘上下移动时把高亮项滚进可视区（列表超高时才有实际位移）。
   useEffect(() => {
@@ -6348,9 +6682,17 @@ function Composer({
     slashRef.current?.querySelector('[data-on="1"]')?.scrollIntoView({ block: 'nearest' })
   }, [slashCur, slashOpen])
 
-  /** 采纳候选：写回 `/name ` 或 `@name `（尾随空格便于接着补充说明，发送前会被 trim），光标留在末尾。 */
-  const applySlash = (c: SlashCommand): void =>
-    composer.setText(c.kind === 'mention' || c.kind === 'newMember' ? `@${c.name} ` : `/${c.name} `, true)
+  /**
+   * 采纳候选：只把光标处已敲的 `/词`、`@词` 换成 `/name `、`@name `，光标后原有的文字不动（见 triggerReplaceEnd），
+   * 光标留在它之后。尾随空格便于接着写、也把名字与后面的文字隔开（发送前会被 trim）；后面本来就是空白则不再加。
+   */
+  const applySlash = (c: SlashCommand): void => {
+    if (!trigger) return
+    const token = c.kind === 'mention' || c.kind === 'newMember' ? `@${c.name}` : `/${c.name}`
+    const end = triggerReplaceEnd(input, trigger, c.name)
+    const next = input.charAt(end)
+    composer.replaceRange(trigger.start, end, next && /\s/.test(next) ? token : `${token} `)
+  }
 
   const name = owner?.name ?? t('cf.assistant')
   // 回合进行中：输入框里的文字会插入当前这一轮，占位提示说明送达时机。
@@ -6453,16 +6795,17 @@ function Composer({
     if (refs.length) addPicked(refs)
   }
 
-  // 粘贴 / 拖入的条目：先问主进程哪些是文件夹，其余照旧作为文件附件。等待期间切走了会话就作罢，
-  // 免得把这个会话的文件夹挂到别的会话上。
+  // 粘贴 / 拖入的条目：先交主进程按真实路径认（文件夹、文件同选择框——读不进消息的只交位置），取不到路径的
+  // （截图等）照旧交字节。等待期间切走了会话就作罢，免得把这个会话的文件夹挂到别的会话上。
   const ingest = async (files: File[]): Promise<void> => {
     const sid = sessionRef.current
-    type Dir = { path: string; name: string }
-    const dirs: (Dir | null)[] = await window.deva.fs.droppedFolders(files).catch(() => [])
+    const entries = await window.deva.fs.droppedEntries(files).catch(() => [])
     if (sessionRef.current !== sid) return
-    const folders = dirs.filter((d): d is Dir => d !== null)
+    const folders = entries.flatMap((e) => (e && 'folder' in e ? [e.folder] : []))
     if (folders.length) addFolders(folders)
-    const rest = files.filter((_, i) => !dirs[i])
+    const picked = entries.flatMap((e) => (e && 'file' in e ? [e.file as Picked] : []))
+    if (picked.length) addPicked(picked)
+    const rest = files.filter((_, i) => !entries[i])
     if (rest.length) await addFiles(rest)
   }
 
@@ -6527,11 +6870,10 @@ function Composer({
     const text = composer.getText()
     const atts = pending.filter((p) => p.supported)
     if (!text.trim() && atts.length === 0) return
-    // /side 纯渲染层指令：打开右侧侧栏（带文字则作为这次提问的由头），不发消息。
-    // 与 /rewind 同构；真正开合由 ChatFirstShell 订阅 side.ts 的总线执行（要用 store 里的 side.open）。
+    // /side 纯渲染层指令：打开右侧侧栏（带文字则作为这次提问的由头），不发消息。与 /rewind 同构。
     const sideMatch = /^\/side(?:[ \t]+([\s\S]*))?$/i.exec(text.trim())
     if (sideMatch && atts.length === 0) {
-      // 直接走 prop，不经模块总线：总线的订阅生命周期与渲染耦合，曾出现「订阅在重渲染的空档被
+      // 走 prop 而非模块总线：总线的订阅生命周期与渲染耦合，曾出现「订阅在重渲染的空档被
       // 拆掉、请求静默丢失」的失效（表现为输入 /side 毫无反应）。同一文件内的父子传参最可靠。
       onSide(sideMatch[1]?.trim() || undefined)
       composer.setText('')
@@ -6651,6 +6993,7 @@ function Composer({
       setInput(text)
       setSlashOff(false) // 又动了输入：Esc 收起的联想重新可唤出
     },
+    onTrigger: setTrigger,
     onKey,
     onPaste,
     isToken,
@@ -6766,7 +7109,6 @@ function Composer({
          * 实际先后按出现的先后（新出现的在最右，见 useDockOrder）；这里的书写顺序只在切会话、几枚同时出现时起作用——
          * 越常驻的越靠左，插入对话最短暂、最需要用户留意，放最后。
          */}
-        {above}
         <div className="cf-dock">
           <TodoCapsule />
           <BackgroundCapsule />
@@ -6796,7 +7138,7 @@ function Composer({
               // 不受支持的进不了 pending（addPicked 已滤掉），兜底按文本卡片画。
               kind: p.kind === 'unsupported' ? 'text' : p.kind,
               size: p.kind === 'folder' ? undefined : p.size,
-              title: p.kind === 'folder' ? p.path : p.reason || p.name,
+              title: p.kind === 'folder' || p.kind === 'file' ? p.path : p.reason || p.name,
               src: p.kind === 'image' ? { path: p.path } : undefined
             }))}
             onRemove={removePending}
@@ -6834,17 +7176,15 @@ function Composer({
               >
                 <WorkspaceMenu root={focusRoot} />
                 <GitWidget root={focusRoot} streaming={streaming} />
-                {canUnmount && (
-                  <button
-                    type="button"
-                    className="cf-wschip__x"
-                    title={t('cf.unmountHint')}
-                    aria-label={t('cf.unmountHint')}
-                    onClick={() => onMount(null)}
-                  >
-                    <X size={13} />
-                  </button>
-                )}
+                <button
+                  type="button"
+                  className="cf-wschip__x"
+                  title={t('cf.unmountHint')}
+                  aria-label={t('cf.unmountHint')}
+                  onClick={() => onMount(null)}
+                >
+                  <X size={13} />
+                </button>
               </span>
             ) : (
               <button
@@ -8632,7 +8972,7 @@ function Avatar({
   plain?: boolean
   /** 框内构图（不探出）：≤20px 自动启用；尺寸由 CSS 决定的小头像（成员名前）显式传。 */
   compact?: boolean
-  /** 忙碌（对话生成中）：头像上叠一道自左向右扫过的高光带，作就地「思考/生成中」指示。 */
+  /** 忙碌（对话生成中）：底板从原形状慢慢变成星芒并转动，结束后变回（见 humation.tsx useBusyMorph）。 */
   busy?: boolean
   /** 待你处理（问答 / 计划 / 挂载 / 待确认名片）：右上角红点。 */
   attention?: boolean
@@ -8641,20 +8981,15 @@ function Avatar({
 }): React.JSX.Element | null {
   const profile = useProfile()
   const style = { ...(size ? { '--sz': `${size}px` } : {}) } as React.CSSProperties
-  const cls = `cf-ava${busy ? ' is-busy' : ''}${user ? ' is-user' : ''}`
+  const cls = `cf-ava${user ? ' is-user' : ''}`
   const seed = user ? USER_AVATAR_SEED : (persona?.id ?? '')
   const spec = user ? profile.avatar : parseAvatarSpec(persona?.avatar)
-  // 遮层必须排在 .cf-ava__face 之后：同为 inset:0 的绝对定位兄弟，靠文档顺序压在头像之上；红点再压在最上。
-  // 扫光按头像形状裁（形状恒铺满头像框）。
-  const sweep = busy ? (
-    <span className="cf-ava__sweep" aria-hidden="true" style={{ mask: shapeMask(resolveShape(seed, spec)) }} />
-  ) : null
+  // 红点排在 .cf-ava__face 之后，靠文档顺序压在头像之上。
   const marks = unread || attention ? <span className="cf-ava__dot" aria-hidden="true" /> : null
   // 非用户、非角色（理论上罕见）：空占位圈。
   if (!user && !persona)
     return (
       <div className={cls} style={style}>
-        {sweep}
         {marks}
       </div>
     )
@@ -8671,9 +9006,9 @@ function Avatar({
           image={user ? profile.avatarImage : (persona as Persona).avatarImage}
           title={title}
           compact={compact ?? (size ?? 28) <= 20}
+          busy={busy}
         />
       </span>
-      {sweep}
       {marks}
     </div>
   )
