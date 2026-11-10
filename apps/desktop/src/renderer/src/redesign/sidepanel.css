@@ -12,6 +12,31 @@
 .cf-sidepanel__head {
   display: flex;
   align-items: center;
+  /* Windows/Linux 的标题栏是叠加式的（titleBarOverlay 高 40px），最小化/最大化/关闭按钮浮在右上角
+     （约 140px 宽）。侧栏在最右侧，头部正好落在那一带——故右侧留出让位区，与 .cf-conv__head 同法，
+     否则自建的「关闭侧栏」× 会与系统的「关闭窗口」× 叠在一起。
+     头部本身不作拖拽区（里面有按钮），拖窗口交给这段留白。 */
+  position: relative;
+  padding: 12px 140px 10px 14px;
+  border-bottom: 1px solid var(--border);
+}
+/* 让位区作窗口拖拽把手：头部里唯一的空白，拖它即拖动窗口。 */
+.cf-sidepanel__head::after {
+  content: '';
+  position: absolute;
+  top: 0;
+  right: 0;
+  width: 140px;
+  height: 40px;
+  -webkit-app-region: drag;
+}
+/* macOS 的窗口控件（红绿灯）在左上角，右侧无需让位——同 .cf-conv__head 的处理。 */
+.is-mac .cf-sidepanel__head {
+  padding-right: 12px;
+}
+.is-mac .cf-sidepanel__head::after {
+  display: none;
+}
   gap: var(--space-2);
   padding: 12px 12px 10px 14px;
   border-bottom: 1px solid var(--border);
@@ -82,6 +107,18 @@
   display: flex;
   flex-direction: column;
   gap: 12px;
+  /* 全局 body 为 user-select:none（应用外壳观感）；正文须可选中才能复制，同 .cf-msg__body 的处理。 */
+  user-select: text;
+}
+/* 头部、引用条、输入框保持不可选（外壳观感），只有正文区和输入框内容可选。 */
+.cf-sidepanel__empty,
+.cf-sidepanel__foot,
+.cf-sidepanel__working {
+  user-select: none;
+}
+.cf-sidepanel__input,
+.cf-sidepanel__quote-text {
+  user-select: text;
 }
 .cf-sidepanel__empty {
   margin: auto 0;

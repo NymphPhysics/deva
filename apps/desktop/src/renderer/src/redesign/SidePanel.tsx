@@ -89,7 +89,19 @@ export function SidePanel(): React.JSX.Element | null {
         </div>
       )}
 
-      <div className="cf-sidepanel__body" ref={listRef}>
+      <div
+        className="cf-sidepanel__body"
+        ref={listRef}
+        // 右键复制选中文字：侧栏在主对话的右键菜单体系之外，选中后需要一个明确可用的复制入口。
+        // 优先走原生 clipboard 桥（sandbox 下最稳），失败回退 navigator.clipboard（同主对话的做法）。
+        onContextMenu={(e) => {
+          const sel = window.getSelection()?.toString().trim()
+          if (!sel) return
+          e.preventDefault()
+          void (window.deva?.clipboard?.writeText(sel) ?? Promise.reject(new Error('no bridge')))
+            .catch(() => void navigator.clipboard?.writeText(sel).catch(() => {}))
+        }}
+      >
         {side.messages.length === 0 && !side.streaming ? (
           <div className="cf-sidepanel__empty">{t('cf.side.empty')}</div>
         ) : (
