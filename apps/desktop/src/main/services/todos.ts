@@ -145,14 +145,28 @@ export function applyTodoWrite(
     return b.some((x) => set.has(x.content))
   }
   const closed = (l: TodoList): boolean => isListDone(l.items) || cancelled.includes(l.id)
-  const base = p.newList || !cur || (closed(cur) && !overlap(cur.items, p.items)) ? null : cur
-  const done = isListDone(p.items) && (!base || !isListDone(base.items))
+  // 「是不是同一件事」的判定：条目内容有重合，或者标题一致（模型改写条目措辞、却沿用同一个标题时，
+  // 也该算同一份清单——否则会开出新清单、进度从 0 重来，正是「做完几项又显示 0」的另一条来源）。
+  const sameTask = (l: TodoList): boolean =>
+    overlap(l.items, p.items) || (!!p.title && !!l.title && p.title === l.title)
+  const base = p.newList || !cur ? null : closed(cur) && !sameTask(cur) ? null : cur
+  // 进度回退保护：todo_write 是整表覆盖，模型偶尔会把同一份清单重写一遍、把已完成的项又写成 pending
+  // （实测见过 6/7 → 0/5 这种倒退，用户看到「明明做完了几项又显示 0」）。同一清单里内容相同的项，
+  // 一旦完成过就不允许退回 pending——已完成是既成事实，只有用户取消整份清单能推翻它。
+  const items = base
+    ? p.items.map((x) => {
+        if (x.status !== 'pending') return x
+        const before = base.items.find((y) => y.content === x.content)
+        return before?.status === 'completed' ? { ...x, status: 'completed' as const } : x
+      })
+    : p.items
+  const done = isListDone(items) && (!base || !isListDone(base.items))
   return {
     id,
     listId: base ? base.id : `l_${id}`,
     at: now,
     title: p.title || (base ? base.title : ''),
-    items: p.items,
+    items,
     ...(done ? { done: true as const } : {})
   }
 }
@@ -162,6 +176,8 @@ export function todoResultText(entry: TodoEntry): string {
   const total = entry.items.length
   const finished = entry.items.filter((x) => x.status === 'completed').length
   if (finished === total) return `清单已全部完成（${finished}/${total}）。`
+  // 模型把已完成的项写回 pending 时由 applyTodoWrite 拦下——明确告诉它，免得它以为重写就能清进度。
+  const guard = finished > 0 ? '（已完成的项会保持完成，不会被重写回待办）' : ''
   const doing = entry.items.filter((x) => x.status === 'in_progress').length
   const hint =
     doing === 0
@@ -169,7 +185,7 @@ export function todoResultText(entry: TodoEntry): string {
       : doing > 1
         ? '同一时刻只应有一项 in_progress，请收敛为一项。'
         : '继续推进：完成一项立即标为 completed，再开始下一项。'
-  return `已更新待办清单（已完成 ${finished}/${total}）。${hint}`
+  return `已更新待办清单（已完成 ${finished}/${total}）。${hint}${guard}`
 }
 
 /** 清单条目的纯文本形态（[x] 已完成 / [~] 进行中 / [ ] 待办），供压缩摘要与跨轮提醒。 */
