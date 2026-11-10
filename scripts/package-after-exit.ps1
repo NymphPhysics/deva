@@ -27,8 +27,8 @@ function Write-Log([string]$msg) {
 Set-Content -Path $log -Value '' -Encoding UTF8
 Write-Log "等待 Deva 退出（请在托盘图标上右键退出，只关窗口不算）…"
 
-# 等 Deva 全部进程退出：最长等 30 分钟，每 2 秒看一次。
-$deadline = (Get-Date).AddMinutes(30)
+# 等 Deva 全部进程退出：最长等 3 小时（够长，不必急着退），每 2 秒看一次。
+$deadline = (Get-Date).AddHours(3)
 while ((Get-Date) -lt $deadline) {
   $procs = @(Get-Process -Name 'Deva' -ErrorAction SilentlyContinue)
   if ($procs.Count -eq 0) { break }
@@ -37,7 +37,7 @@ while ((Get-Date) -lt $deadline) {
 
 $procs = @(Get-Process -Name 'Deva' -ErrorAction SilentlyContinue)
 if ($procs.Count -gt 0) {
-  Write-Log "等了 30 分钟 Deva 仍在运行（$($procs.Count) 个进程），放弃打包。"
+  Write-Log "等了 3 小时 Deva 仍在运行（$($procs.Count) 个进程），放弃打包。"
   [System.Windows.Forms.MessageBox]::Show(
     "Deva 一直没有退出，本次没有打包。想看日志：${log}", 'Deva 打包已中止') | Out-Null
   exit 1

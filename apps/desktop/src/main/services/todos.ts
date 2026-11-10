@@ -144,12 +144,15 @@ export function applyTodoWrite(
     const set = new Set(a.map((x) => x.content))
     return b.some((x) => set.has(x.content))
   }
-  const closed = (l: TodoList): boolean => isListDone(l.items) || cancelled.includes(l.id)
-  // 「是不是同一件事」的判定：条目内容有重合，或者标题一致（模型改写条目措辞、却沿用同一个标题时，
-  // 也该算同一份清单——否则会开出新清单、进度从 0 重来，正是「做完几项又显示 0」的另一条来源）。
+  // 「是不是同一件事」的判定。原先只在清单已收尾时才检查，导致一个真实问题：上一份清单还留着
+  // 一项 in_progress（模型没来得及收尾），用户接着让它做**另一件事**，新清单被当成同一份继续写，
+  // 进度直接从 5/6 覆盖成 0/10（实测数据里就是这样）。故不论清单是否已收尾，换了任务都要新开：
+  //  · 条目内容有重合 → 同一件事（追加步骤、改措辞都算）；
+  //  · 或标题一致 → 同一件事（模型沿用标题、重写了条目）；
+  //  · 两者都不满足 → 换了任务，新开清单、进度从 0 起。
   const sameTask = (l: TodoList): boolean =>
     overlap(l.items, p.items) || (!!p.title && !!l.title && p.title === l.title)
-  const base = p.newList || !cur ? null : closed(cur) && !sameTask(cur) ? null : cur
+  const base = p.newList || !cur || !sameTask(cur) ? null : cur
   // 进度回退保护：todo_write 是整表覆盖，模型偶尔会把同一份清单重写一遍、把已完成的项又写成 pending
   // （实测见过 6/7 → 0/5 这种倒退，用户看到「明明做完了几项又显示 0」）。同一清单里内容相同的项，
   // 一旦完成过就不允许退回 pending——已完成是既成事实，只有用户取消整份清单能推翻它。
